@@ -4,6 +4,7 @@ import katexCss from 'katex/dist/katex.min.css?inline';
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { RichContentBlock } from '../shared/local-thread';
+import { normalizeRichContentBlocks } from '../shared/rich-content';
 
 const katexAssetBase = typeof chrome !== 'undefined' && chrome.runtime?.getURL ? chrome.runtime.getURL('assets/') : '/assets/';
 export const richContentStyles = `${katexCss.replaceAll('url(/assets/', `url(${katexAssetBase}`)}
@@ -16,6 +17,7 @@ export const richContentStyles = `${katexCss.replaceAll('url(/assets/', `url(${k
 .pointask-rich-content :where(p, ul, ol, blockquote) { margin: .55em 0; }
 .pointask-rich-content :where(ul, ol) { padding-left: 1.5em; }
 .pointask-rich-content li + li { margin-top: .2em; }
+.pointask-rich-content li > p { margin: .2em 0; }
 .pointask-rich-content blockquote { padding: .2em .75em; border-left: 3px solid #9aa0a6; color: #555; }
 .pointask-rich-content a { color: #0969da; text-decoration: underline; }
 .pointask-rich-content table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
@@ -63,6 +65,11 @@ function MarkdownText({ value }: { value: string }) {
   return block ? <div className="pointask-markdown-block">{content}</div> : <span className="pointask-markdown-inline">{content}</span>;
 }
 
+function InlineMarkdownText({ value }: { value: string }) {
+  if (!['[', ']', '*', '_', '~', '`'].some((marker) => value.includes(marker))) return <>{value}</>;
+  return <ReactMarkdown remarkPlugins={[remarkGfm]} components={inlineMarkdownComponents} skipHtml urlTransform={safeMarkdownUrl}>{value}</ReactMarkdown>;
+}
+
 function MathBlock({ latex, displayMode }: { latex: string; displayMode: boolean }) {
   const ref = useRef<HTMLSpanElement>(null);
   useEffect(() => {
@@ -72,13 +79,21 @@ function MathBlock({ latex, displayMode }: { latex: string; displayMode: boolean
   return <span ref={ref} className={displayMode ? 'pointask-block-math' : 'pointask-inline-math'} />;
 }
 
+function RenderBlocks({ blocks, inline = false }: { blocks: RichContentBlock[]; inline?: boolean }) {
+  return blocks.map((block, index) => {
+    if (block.type === 'line_break') return <br key={index} />;
+    if (block.type === 'text') return inline ? <InlineMarkdownText key={index} value={block.content} /> : <MarkdownText key={index} value={block.content} />;
+    if (block.type === 'inline_code') return <code className="pointask-inline-code" key={index}>{block.content}</code>;
+    if (block.type === 'code' || block.type === 'code_block') return <pre key={index}><code data-language={block.language}>{block.content}</code></pre>;
+    if (block.type === 'inline_math' || block.type === 'block_math') return <MathBlock key={index} latex={block.latex} displayMode={block.type === 'block_math'} />;
+    if (block.type === 'paragraph') return <p key={index}><RenderBlocks blocks={block.children} inline /></p>;
+    if (block.type === 'blockquote') return <blockquote key={index}><RenderBlocks blocks={block.children} /></blockquote>;
+    if (block.type === 'list_item') return <li key={index}><RenderBlocks blocks={block.children} /></li>;
+    if (block.type === 'ordered_list') return <ol key={index} start={block.start}><RenderBlocks blocks={block.items} /></ol>;
+    return <ul key={index}><RenderBlocks blocks={block.items} /></ul>;
+  });
+}
+
 export function RichContentRenderer({ blocks }: { blocks: RichContentBlock[] }) {
-  return <div className="pointask-rich-content">
-    {blocks.map((block, index) => {
-      if (block.type === 'line_break') return <br key={index} />;
-      if (block.type === 'text') return <MarkdownText key={index} value={block.content} />;
-      if (block.type === 'code') return <pre key={index}><code data-language={block.language}>{block.content}</code></pre>;
-      return <MathBlock key={index} latex={block.latex} displayMode={block.type === 'block_math'} />;
-    })}
-  </div>;
+  return <div className="pointask-rich-content"><RenderBlocks blocks={normalizeRichContentBlocks(blocks)} /></div>;
 }

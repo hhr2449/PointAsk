@@ -173,19 +173,29 @@ export function isPointAskRuntimeMessage(value: unknown): value is PointAskRunti
 function isRichContent(value: unknown): value is RichContentBlock[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > 500) return false;
   let contentLength = 0;
-  return value.every((raw) => {
+  const validate = (raw: unknown, depth = 0): boolean => {
+    if (depth > 12) return false;
     if (!isRecord(raw)) return false;
     if (raw.type === 'line_break') { contentLength++; return contentLength <= 8_000 && hasOnlyKeys(raw, ['type']); }
-    if ((raw.type === 'text' || raw.type === 'code') && typeof raw.content === 'string') {
+    if (['text', 'inline_code', 'code', 'code_block'].includes(String(raw.type)) && typeof raw.content === 'string') {
       contentLength += raw.content.length;
-      return contentLength <= 8_000 && hasOnlyKeys(raw, raw.type === 'code' ? ['type', 'content', 'language'] : ['type', 'content']) &&
+      return contentLength <= 8_000 && hasOnlyKeys(raw, raw.type === 'code' || raw.type === 'code_block' ? ['type', 'content', 'language'] : ['type', 'content']) &&
         (raw.language === undefined || typeof raw.language === 'string');
     }
     if ((raw.type === 'inline_math' || raw.type === 'block_math') && typeof raw.latex === 'string') {
       contentLength += raw.latex.length; return contentLength <= 8_000 && hasOnlyKeys(raw, ['type', 'latex']);
     }
+    if (['paragraph', 'blockquote', 'list_item'].includes(String(raw.type)) && Array.isArray(raw.children)) {
+      return hasOnlyKeys(raw, ['type', 'children']) && raw.children.length <= 500 && raw.children.every((child) => validate(child, depth + 1));
+    }
+    if ((raw.type === 'ordered_list' || raw.type === 'unordered_list') && Array.isArray(raw.items)) {
+      return hasOnlyKeys(raw, raw.type === 'ordered_list' ? ['type', 'items', 'start'] : ['type', 'items']) &&
+        (raw.start === undefined || typeof raw.start === 'number') && raw.items.length <= 500 &&
+        raw.items.every((item) => isRecord(item) && item.type === 'list_item' && validate(item, depth + 1));
+    }
     return false;
-  });
+  };
+  return value.every((raw) => validate(raw));
 }
 
 function isAnswerSource(value: unknown): value is AnswerSourceLocator {

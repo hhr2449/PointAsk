@@ -13,6 +13,7 @@
 - **Pending thread manager:** tracks a follow-up between prompt creation and manual answer attachment.
 - **Web conversation bridge:** persists prompts and coordinates visible ChatGPT tabs. Filling and submission are permitted only in the direct handler of an explicitly labelled send button after authorization. The background atomically reserves the current prompt hash before the adapter clicks the visible send control, preventing duplicate submission after refresh or repeated clicks.
 - **Rich-content extractor/renderer:** treats KaTeX, MathML, and code as atomic selection nodes, stores typed blocks, and renders LaTeX with bundled KaTeX inside each PointAsk Shadow Root.
+- **Structured answer documents:** extraction distinguishes paragraphs, blockquotes, ordered/unordered lists, list items, inline code, code blocks, and math. A shared recursive normalizer removes legacy spacer breaks, converts legacy `code` records to `code_block`, and runs both during migration and immediately before rendering.
 - **Answer navigation manager:** stores a short-lived locator, opens or activates the visible conversation, resolves the assistant fingerprint, scrolls, highlights, and clears the locator.
 - **Manual answer attachment:** accepts answer text only from an explicit user selection and attach action.
 - **Thread store:** hides `chrome.storage.local` behind a typed interface and enforces `pointask:` keys.

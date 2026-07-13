@@ -4,6 +4,14 @@ export type CurrentConversationScrollBehavior = 'stay_at_source' | 'follow_respo
 
 export type RichContentBlock =
   | { type: 'text'; content: string }
+  | { type: 'paragraph'; children: RichContentBlock[] }
+  | { type: 'blockquote'; children: RichContentBlock[] }
+  | { type: 'ordered_list'; items: RichContentBlock[]; start?: number }
+  | { type: 'unordered_list'; items: RichContentBlock[] }
+  | { type: 'list_item'; children: RichContentBlock[] }
+  | { type: 'inline_code'; content: string }
+  | { type: 'code_block'; content: string; language?: string }
+  /** Legacy storage shape; normalized to code_block before rendering. */
   | { type: 'inline_math'; latex: string }
   | { type: 'block_math'; latex: string }
   | { type: 'code'; content: string; language?: string }

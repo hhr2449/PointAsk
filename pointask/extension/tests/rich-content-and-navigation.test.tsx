@@ -6,6 +6,7 @@ import { extractLatex, extractRichContent } from '../src/adapters/rich-content-e
 import { RichContentRenderer, richContentStyles } from '../src/components/rich-content-renderer';
 import { ViewAnchorController } from '../src/content/view-anchor-controller';
 import { migrateStorage } from '../src/storage/migration';
+import { normalizeRichContentBlocks } from '../src/shared/rich-content';
 import { STORAGE_KEYS } from '../src/storage/storage-schema';
 import { stableTextHash } from '../src/shared/text-utils';
 import { MemoryStorageDriver } from '../src/storage/storage-driver';
@@ -24,7 +25,7 @@ describe('rich ChatGPT content', () => {
     const text = paragraph.firstChild!;
     const annotation = paragraph.querySelector('annotation')!.firstChild!;
     const rich = extractRichContent(range(text, 0, annotation, 2));
-    expect(rich.blocks).toEqual([{ type: 'text', content: '能量 ' }, { type: 'inline_math', latex: 'E=mc^2' }]);
+    expect(rich.blocks).toEqual([{ type: 'paragraph', children: [{ type: 'text', content: '能量 ' }, { type: 'inline_math', latex: 'E=mc^2' }] }]);
     expect(rich.plainText).toContain('E=mc^2');
   });
 
@@ -32,9 +33,9 @@ describe('rich ChatGPT content', () => {
     document.body.innerHTML = '<div id="root"><span class="katex" data-latex="x+1" aria-label="wrong"><span>x</span></span> 后文<div class="katex-display"><span class="katex"><math><annotation encoding="application/x-tex">\\int_0^1 x dx</annotation></math></span></div><pre><code class="language-ts">const x = 1;</code></pre></div>';
     const root = document.getElementById('root')!; const selection = document.createRange(); selection.selectNodeContents(root);
     const rich = extractRichContent(selection);
-    expect(rich.blocks).toContainEqual({ type: 'inline_math', latex: 'x+1' });
+    expect(rich.blocks[0]).toMatchObject({ type: 'paragraph', children: [{ type: 'inline_math', latex: 'x+1' }, { type: 'text', content: ' 后文' }] });
     expect(rich.blocks).toContainEqual({ type: 'block_math', latex: '\\int_0^1 x dx' });
-    expect(rich.blocks).toContainEqual({ type: 'code', content: 'const x = 1;', language: 'ts' });
+    expect(rich.blocks).toContainEqual({ type: 'code_block', content: 'const x = 1;', language: 'ts' });
     expect(extractLatex(root.querySelector('.katex')!)).toBe('x+1');
   });
 
@@ -65,14 +66,48 @@ describe('rich ChatGPT content', () => {
   it('does not execute raw HTML, javascript links, or load Markdown images', async () => {
     const container = document.createElement('div'); document.body.append(container); const root = createRoot(container);
     await act(() => root.render(<RichContentRenderer blocks={[
-      { type: 'text', content: '<script>globalThis.pointaskUnsafe = true</script>' },
-      { type: 'text', content: '[危险](javascript:alert(1)) ![远程图](https://example.com/tracker.png)' },
+      { type: 'paragraph', children: [{ type: 'text', content: '<script>globalThis.pointaskUnsafe = true</script>' }] },
+      { type: 'paragraph', children: [{ type: 'text', content: '[危险](javascript:alert(1)) ![远程图](https://example.com/tracker.png)' }] },
     ]} />));
     expect(container.querySelector('script')).toBeNull();
     expect(container.querySelector('img')).toBeNull();
     expect(container.querySelector('a')).toBeNull();
     expect(container.textContent).toContain('[图片：远程图]');
     await act(() => root.unmount());
+  });
+
+  it('preserves ordered lists, blockquotes, inline code, punctuation, and multiline code blocks', async () => {
+    document.body.innerHTML = `<div id="structured"><p>令 <code>x</code>；再令 <code>x=2</code>。</p>
+      <ol start="2"><li><p>第二项</p></li><li><p>第三项</p></li></ol>
+      <blockquote><p>引用内容</p></blockquote><pre><code class="language-ts">if (x) {\n  run();\n}</code></pre></div>`;
+    const rich = new ChatGptAdapter().getRichSelection((() => { const value = document.createRange(); value.selectNodeContents(document.getElementById('structured')!); return value; })());
+    expect(rich.blocks[0]).toEqual({ type: 'paragraph', children: [
+      { type: 'text', content: '令 ' }, { type: 'inline_code', content: 'x' }, { type: 'text', content: '；再令 ' },
+      { type: 'inline_code', content: 'x=2' }, { type: 'text', content: '。' },
+    ] });
+    expect(rich.blocks[1]).toMatchObject({ type: 'ordered_list', start: 2, items: [{ type: 'list_item' }, { type: 'list_item' }] });
+    expect(rich.blocks[2]).toMatchObject({ type: 'blockquote' });
+    expect(rich.blocks[3]).toEqual({ type: 'code_block', content: 'if (x) {\n  run();\n}', language: 'ts' });
+    const container = document.createElement('div'); const root = createRoot(container);
+    await act(() => root.render(<RichContentRenderer blocks={rich.blocks} />));
+    expect(container.querySelector('ol')?.start).toBe(2); expect(container.querySelectorAll('ol > li')).toHaveLength(2);
+    expect(container.querySelector('blockquote')?.textContent).toContain('引用内容');
+    expect(container.querySelector('p')?.textContent).toBe('令 x；再令 x=2。');
+    expect(container.querySelector('pre code')?.textContent).toBe('if (x) {\n  run();\n}');
+    await act(() => root.unmount());
+  });
+
+  it('cleans consecutive and edge line breaks while preserving formula/list structure', () => {
+    const normalized = normalizeRichContentBlocks([
+      { type: 'line_break' }, { type: 'line_break' },
+      { type: 'paragraph', children: [{ type: 'text', content: '公式 ' }, { type: 'inline_math', latex: 'x^2' }, { type: 'line_break' }, { type: 'line_break' }] },
+      { type: 'unordered_list', items: [{ type: 'list_item', children: [{ type: 'block_math', latex: '\\sum_i i' }] }] },
+      { type: 'line_break' }, { type: 'line_break' },
+    ]);
+    expect(normalized).toEqual([
+      { type: 'paragraph', children: [{ type: 'text', content: '公式 ' }, { type: 'inline_math', latex: 'x^2' }] },
+      { type: 'unordered_list', items: [{ type: 'list_item', children: [{ type: 'block_math', latex: '\\sum_i i' }] }] },
+    ]);
   });
 });
 
