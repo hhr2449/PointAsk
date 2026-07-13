@@ -38,7 +38,15 @@ export type PointAskRuntimeMessage =
   | { type: 'pointask:undo-attachment'; pendingThreadId: string }
   | { type: 'pointask:candidate-answer-state'; pendingThreadId: string; fingerprint: string; streaming: boolean }
   | { type: 'pointask:open-workspace-context-update'; workspaceId: string }
-  | { type: 'pointask:reserve-prompt-submission'; pendingThreadId: string; promptHash: string; targetUrl: string };
+  | { type: 'pointask:reserve-prompt-submission'; pendingThreadId: string; promptHash: string; targetUrl: string }
+  | { type: 'pointask:release-prompt-submission'; pendingThreadId: string; promptHash: string }
+  | { type: 'pointask:send-pending-prompt'; pendingThreadId: string };
+
+export interface ExecutePendingSendMessage {
+  type: 'pointask:execute-pending-send';
+  pendingThreadId: string;
+  record: PendingAssociation;
+}
 
 const messageTypes = new Set([
   'pointask:create-pending-thread',
@@ -59,6 +67,8 @@ const messageTypes = new Set([
   'pointask:candidate-answer-state',
   'pointask:open-workspace-context-update',
   'pointask:reserve-prompt-submission',
+  'pointask:release-prompt-submission',
+  'pointask:send-pending-prompt',
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -137,6 +147,10 @@ export function isPointAskRuntimeMessage(value: unknown): value is PointAskRunti
     case 'pointask:reserve-prompt-submission':
       return hasOnlyKeys(value, ['type', 'pendingThreadId', 'promptHash', 'targetUrl']) && isNonEmptyString(value.pendingThreadId) &&
         isNonEmptyString(value.promptHash) && isNonEmptyString(value.targetUrl) && isChatGptUrl(value.targetUrl);
+    case 'pointask:release-prompt-submission':
+      return hasOnlyKeys(value, ['type', 'pendingThreadId', 'promptHash']) && isNonEmptyString(value.pendingThreadId) && isNonEmptyString(value.promptHash);
+    case 'pointask:send-pending-prompt':
+      return hasOnlyKeys(value, ['type', 'pendingThreadId']) && isNonEmptyString(value.pendingThreadId);
     case 'pointask:associate-target-page':
       return hasOnlyKeys(value, ['type', 'pendingThreadId', 'targetUrl', 'confirmReassociation']) &&
         isNonEmptyString(value.pendingThreadId) && isNonEmptyString(value.targetUrl) && isChatGptUrl(value.targetUrl) &&
@@ -185,7 +199,7 @@ function isRichContent(value: unknown): value is RichContentBlock[] {
     if ((raw.type === 'inline_math' || raw.type === 'block_math') && typeof raw.latex === 'string') {
       contentLength += raw.latex.length; return contentLength <= 8_000 && hasOnlyKeys(raw, ['type', 'latex']);
     }
-    if (['paragraph', 'blockquote', 'list_item', 'heading', 'table_cell'].includes(String(raw.type)) && Array.isArray(raw.children)) {
+    if (['strong', 'emphasis', 'strikethrough', 'paragraph', 'blockquote', 'list_item', 'heading', 'table_cell'].includes(String(raw.type)) && Array.isArray(raw.children)) {
       const keys = raw.type === 'heading' ? ['type', 'level', 'children'] : raw.type === 'table_cell' ? ['type', 'children', 'header'] : ['type', 'children'];
       return hasOnlyKeys(raw, keys) && (raw.type !== 'heading' || typeof raw.level === 'number' && raw.level >= 1 && raw.level <= 6) &&
         (raw.type !== 'table_cell' || raw.header === undefined || typeof raw.header === 'boolean') &&
@@ -262,6 +276,12 @@ export function isPendingAssociationUpdate(value: unknown): value is {
     (record.targetConversationUrl === undefined || (isNonEmptyString(record.targetConversationUrl) && isChatGptUrl(record.targetConversationUrl))) &&
     ['created', 'target_opened', 'awaiting_manual_association', 'associated', 'completed', 'cancelled'].includes(String(record.associationStatus)) &&
     isNonEmptyString(record.createdAt) && isNonEmptyString(record.updatedAt);
+}
+
+export function isExecutePendingSendMessage(value: unknown): value is ExecutePendingSendMessage {
+  return isRecord(value) && value.type === 'pointask:execute-pending-send' && hasOnlyKeys(value, ['type', 'pendingThreadId', 'record']) &&
+    isNonEmptyString(value.pendingThreadId) && isPendingAssociationUpdate({ type: 'pointask:pending-thread-updated', record: value.record }) &&
+    (value.record as PendingAssociation).pendingThread.id === value.pendingThreadId;
 }
 
 export function isLocalThread(value: unknown): value is LocalThread {

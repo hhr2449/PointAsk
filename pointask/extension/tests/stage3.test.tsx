@@ -169,16 +169,27 @@ describe('pending thread card flow', () => {
     if (!threadId) throw new Error('Expected a pending thread ID');
     await act(() => manager.toggle(threadId));
     expect(manager.getThread(threadId)?.status).toBe('prompt_ready');
-    expect(manager.getHost(threadId)?.shadowRoot?.textContent).toContain('等待发送');
+    expect(manager.getHost(threadId)?.shadowRoot?.textContent).toContain('正在发送……');
+    expect(manager.getHost(threadId)?.shadowRoot?.querySelector('.pointask-primary-action')).toBeNull();
 
     await act(async () => { await manager.copy(threadId); });
     expect(writeText).toHaveBeenCalledOnce();
-    expect(manager.getHost(threadId)?.shadowRoot?.textContent).toContain('备用：复制提示词');
 
     await act(() => manager.next(threadId));
     expect(manager.getThread(threadId)?.status).toBe('waiting_for_answer');
     expect(pending.get(threadId)?.status).toBe('waiting_for_answer');
-    expect(manager.getHost(threadId)?.shadowRoot?.textContent).toContain('正在回答');
+    expect(manager.getHost(threadId)?.shadowRoot?.textContent).toContain('正在等待回答……');
+  });
+
+  it('shows a resend action only after sending fails', async () => {
+    const pending = new PendingThreadManager(undefined, () => 'pointask-pending-failed');
+    const manager = new InlineThreadManager(pending, new ClipboardManager(undefined, () => false));
+    let id: string | null = null;
+    await act(async () => { id = await manager.create(selectionData(), '失败后重试', 'workspace'); });
+    if (!id) throw new Error('Expected a pending thread ID');
+    await act(async () => { manager.cancel(id!); await Promise.resolve(); });
+    expect(manager.getThread(id)?.status).toBe('failed');
+    expect(manager.getHost(id)?.shadowRoot?.querySelector('.pointask-primary-action')?.textContent).toBe('重新发送');
   });
 
   it('deletes pending data, unmounts its React root, and removes its host', () => {

@@ -15,7 +15,6 @@ import { SettingsStore } from '../storage/settings-store';
 import { MetricsStore } from '../storage/metrics-store';
 import { SpaLifecycleManager } from './spa-lifecycle-manager';
 import { WorkspaceStore } from '../storage/workspace-store';
-import { AnswerModeMount } from './answer-mode-mount';
 import { runStorageMigration } from '../storage/migration';
 import { AnswerNavigationManager } from './answer-navigation-manager';
 import { WorkspaceContextMount } from './workspace-context-mount';
@@ -43,8 +42,8 @@ if (adapter.isSupportedPage()) {
   const threads = new InlineThreadManager(
     pendingThreads, clipboard, webBridge, undefined, undefined, threadStore, pendingStore, metrics, workspaceStore, adapter, operationAuthorizer,
   );
-  const answerModeMount = new AnswerModeMount();
   const banner = new PendingBannerManager(webBridge, clipboard, adapter, operationAuthorizer);
+  banner.setReturnToThreadHandler((id) => threads.reveal(id));
   const attachment = new AnswerAttachmentMount(webBridge, operationAuthorizer);
   const answerNavigation = new AnswerNavigationManager(adapter, webBridge);
   const workspaceContextMount = new WorkspaceContextMount();
@@ -63,8 +62,9 @@ if (adapter.isSupportedPage()) {
         anchorElement,
         sourceMessageElement: anchorElement,
       },
+      answerMode: thread.answerMode,
       onCancel: () => threads.focus(id),
-      onSubmit: async (question) => { await threads.continueThread(id, question); },
+      onSubmit: (question) => { void threads.continueThread(id, question).then((sent) => { if (!sent) threads.focus(id); }); },
     });
   });
   threads.setWorkspaceContextHandler((workspace, threadId) => {
@@ -160,26 +160,25 @@ if (adapter.isSupportedPage()) {
       if (!data) return;
       toolbar.hide();
       const cancel = () => { toolbar.show(data, banner.getAttachmentAssociations()); toolbar.focus(); };
-      const openQuestion = (initialQuestion = '') => composer.open({
+      const openQuestion = () => composer.open({
         data,
-        initialQuestion,
         onCancel: cancel,
-        onSubmit: (question) => {
-          answerModeMount.open(
-            (mode) => { void threads.create(data, question, mode).then((threadId) => {
-              if (!threadId) return;
-              threads.focus(threadId);
-              void threads.startAnswerFlow(threadId);
-            }); },
-            () => openQuestion(question),
-            cancel,
-          );
+        onSubmit: async (question, mode) => {
+          const threadId = await threads.create(data, question, mode);
+          if (!threadId) return;
+          void threads.confirmAnswerModeAndSend(threadId).then((sent) => { if (!sent) threads.focus(threadId); });
         },
       });
       openQuestion();
     },
     onAttach: (data, association) => {
       toolbar.hide();
+      if (association.localThread.answerMode === 'current_conversation') {
+        void banner.attachCurrentSelection(data, association).then((attached) => {
+          if (!attached) { toolbar.show(data, banner.getAttachmentAssociations()); toolbar.focus(); }
+        });
+        return;
+      }
       attachment.open(
         data,
         association,

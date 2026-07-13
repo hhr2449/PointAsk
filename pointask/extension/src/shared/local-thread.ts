@@ -4,6 +4,9 @@ export type CurrentConversationScrollBehavior = 'stay_at_source' | 'follow_respo
 
 export type RichContentBlock =
   | { type: 'text'; content: string }
+  | { type: 'strong'; children: RichContentBlock[] }
+  | { type: 'emphasis'; children: RichContentBlock[] }
+  | { type: 'strikethrough'; children: RichContentBlock[] }
   | { type: 'paragraph'; children: RichContentBlock[] }
   | { type: 'blockquote'; children: RichContentBlock[] }
   | { type: 'ordered_list'; items: RichContentBlock[]; start?: number }

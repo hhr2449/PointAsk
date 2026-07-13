@@ -4,6 +4,7 @@ import { ChatGptAdapter } from '../src/adapters/chatgpt-adapter';
 import { PendingAssociationCoordinator } from '../src/background/pending-association-coordinator';
 import type { PendingThread } from '../src/bridge/pending-thread-manager';
 import { WebConversationBridge } from '../src/bridge/web-conversation-bridge';
+import type { PendingAssociation } from '../src/bridge/runtime-messages';
 import { AnswerAttachmentMount } from '../src/content/answer-attachment-mount';
 import { MAX_ATTACHED_ANSWER_LENGTH } from '../src/components/answer-attachment-confirmation';
 import { readSelection, type SelectionData } from '../src/content/selection-manager';
@@ -11,6 +12,7 @@ import { SelectionToolbar } from '../src/content/selection-toolbar';
 import { PendingBannerManager } from '../src/content/pending-banner-manager';
 import { ClipboardManager } from '../src/bridge/clipboard-manager';
 import { chatGptFixture } from './fixtures/chatgpt';
+import { stableTextHash } from '../src/shared/text-utils';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -95,13 +97,39 @@ describe('attachment selection entry', () => {
 });
 
 describe('manual answer confirmation and storage', () => {
-  it('keeps a current-conversation pending available for attachment without rendering a top-right banner', () => {
+  it('waits for the target composer and sends without a second authorization prompt', async () => {
+    const workspace = association('workspace-auto-send').record;
+    const promptHash = 'workspace-prompt-hash';
+    const record = { ...workspace,
+      pendingThread: { ...workspace.pendingThread, answerMode: 'workspace' as const, promptHash },
+      localThread: { ...workspace.localThread, answerMode: 'workspace' as const, status: 'waiting_for_submission' as const },
+    };
+    const sendMessage = vi.fn().mockResolvedValue({ ok: true, data: record });
+    const adapter = new ChatGptAdapter();
+    const fillComposer = vi.spyOn(adapter, 'fillComposer').mockReturnValueOnce(false).mockReturnValue(true);
+    vi.spyOn(adapter, 'canSubmitComposer').mockReturnValue(true);
+    const submitComposer = vi.spyOn(adapter, 'submitComposer').mockReturnValue(true);
+    const authorize = vi.fn().mockResolvedValue(false);
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }), new ClipboardManager(undefined, () => false), adapter, { authorize } as never);
+    act(() => manager.applyRecord(record));
+    const execute = manager as unknown as { fill(id: string, skipAuthorization: boolean): Promise<boolean> };
+    let success = false;
+    await act(async () => { success = await execute.fill(record.pendingThread.id, true); });
+    expect(success).toBe(true);
+    expect(fillComposer).toHaveBeenCalledTimes(2);
+    expect(submitComposer).toHaveBeenCalledOnce();
+    expect(authorize).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'pointask:reserve-prompt-submission', pendingThreadId: record.pendingThread.id }));
+    act(() => manager.stop());
+  });
+
+  it('keeps a current-conversation pending out of generic attachment choices and the top-right banner', () => {
     const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage: vi.fn() }), new ClipboardManager(undefined, () => false), new ChatGptAdapter());
     const current = association().record;
     act(() => manager.applyRecord({ ...current, pendingThread: { ...current.pendingThread, answerMode: 'current_conversation' },
       localThread: { ...current.localThread, answerMode: 'current_conversation', status: 'waiting_for_answer' } }));
     expect((document.querySelector('pointask-pending-thread-banner') as HTMLElement).style.display).toBe('none');
-    expect(manager.getAttachmentAssociations()).toHaveLength(1);
+    expect(manager.getAttachmentAssociations()).toHaveLength(0);
     act(() => manager.stop());
   });
 
@@ -111,6 +139,116 @@ describe('manual answer confirmation and storage', () => {
     act(() => manager.applyRecord({ ...current, pendingThread: { ...current.pendingThread, status: 'answer_attached' },
       localThread: { ...current.localThread, answerMode: 'current_conversation', status: 'answer_attached' } }));
     expect((document.querySelector('pointask-pending-thread-banner') as HTMLElement).style.display).toBe('none');
+    act(() => manager.stop());
+  });
+
+  it('renders a thread-specific action beside the exact current-conversation answer and attaches once before returning', async () => {
+    const prompt = '[PointAsk]\n本页面问题';
+    document.body.innerHTML = `<article data-testid="conversation-turn-user"><div data-message-author-role="user"><div data-message-content>${prompt}</div></div></article>
+      <article data-testid="conversation-turn-answer" data-is-streaming="true"><div data-message-author-role="assistant"><div class="markdown"><p>本页面完整回答</p></div></div></article>`;
+    const adapter = new ChatGptAdapter(); const base = association('current-answer', 1, 1).record;
+    let current: PendingAssociation = {
+      ...base,
+      pendingThread: { ...base.pendingThread, answerMode: 'current_conversation' as const, promptHash: stableTextHash(prompt), assistantFingerprintsBefore: [] },
+      localThread: { ...base.localThread, displayId: 'PA-004', answerMode: 'current_conversation' as const, status: 'waiting_for_answer' as const },
+    };
+    const sendMessage = vi.fn().mockImplementation((message: { type: string; fingerprint?: string; richContent?: unknown[] }) => {
+      if (message.type === 'pointask:candidate-answer-state') current = {
+        ...current,
+        pendingThread: { ...current.pendingThread, candidateAnswerFingerprint: message.fingerprint, status: document.querySelector('[data-is-streaming]') ? 'generating' : 'answer_ready' },
+        localThread: { ...current.localThread, status: document.querySelector('[data-is-streaming]') ? 'generating' : 'answer_ready' },
+      };
+      if (message.type === 'pointask:attach-answer') current = {
+        ...current,
+        pendingThread: { ...current.pendingThread, status: 'answer_attached' },
+        localThread: { ...current.localThread, status: 'answer_attached', messages: [
+          ...current.localThread.messages,
+          { id: 'answer', role: 'assistant' as const, content: message.richContent as never, attachedManually: true, createdAt: current.updatedAt },
+        ] },
+      };
+      return Promise.resolve({ ok: true, data: current });
+    });
+    const authorize = vi.fn().mockResolvedValue(false);
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }), new ClipboardManager(undefined, () => false), adapter, { authorize } as never);
+    const returned = vi.fn().mockReturnValue(true); manager.setReturnToThreadHandler(returned);
+    await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
+    let action = document.querySelector('pointask-current-answer-actions');
+    expect(action?.previousElementSibling?.getAttribute('data-testid')).toBe('conversation-turn-answer');
+    expect(action?.shadowRoot?.textContent).toContain('附加并返回 PA-004');
+    expect(action?.shadowRoot?.querySelector<HTMLButtonElement>('.pointask-primary')?.disabled).toBe(true);
+
+    document.querySelector('[data-is-streaming]')?.removeAttribute('data-is-streaming');
+    await act(async () => { (manager as unknown as { refreshCandidates(): void }).refreshCandidates(); await Promise.resolve(); });
+    action = document.querySelector('pointask-current-answer-actions');
+    const attach = action?.shadowRoot?.querySelector<HTMLButtonElement>('.pointask-primary');
+    expect(attach?.disabled).toBe(false);
+    await act(async () => { attach?.click(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
+    expect(sendMessage.mock.calls.filter(([message]) => message.type === 'pointask:attach-answer')).toHaveLength(1);
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'pointask:attach-answer', pendingThreadId: 'current-answer' }));
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'pointask:pending-thread-updated', pendingThreadId: 'current-answer', action: 'return-source' }));
+    expect(returned).toHaveBeenCalledWith('current-answer');
+    expect(document.querySelector('pointask-current-answer-actions')).toBeNull();
+    expect(document.querySelector('pointask-answer-attachment-confirmation')).toBeNull();
+    expect(authorize).not.toHaveBeenCalled();
+    act(() => manager.stop());
+  });
+
+  it('omits whole-answer attachment when ownership is not reliable', async () => {
+    document.body.innerHTML = '<article data-testid="conversation-turn-answer"><div data-message-author-role="assistant"><div class="markdown">候选回答</div></div></article>';
+    const adapter = new ChatGptAdapter(); const answer = document.querySelector('article') as HTMLElement;
+    const fingerprint = adapter.getMessageFingerprint(answer); const base = association('uncertain-current', 1, 1).record;
+    const current = {
+      ...base,
+      pendingThread: { ...base.pendingThread, answerMode: 'current_conversation' as const, promptHash: 'not-a-match', candidateAnswerFingerprint: fingerprint, status: 'answer_ready' as const },
+      localThread: { ...base.localThread, displayId: 'PA-009', answerMode: 'current_conversation' as const, status: 'answer_ready' as const },
+    };
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage: vi.fn().mockResolvedValue({ ok: true, data: current }) }),
+      new ClipboardManager(undefined, () => false), adapter);
+    await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
+    const action = document.querySelector('pointask-current-answer-actions');
+    expect(action?.shadowRoot?.textContent).not.toContain('附加并返回');
+    expect(action?.shadowRoot?.textContent).toContain('框选部分附加');
+    expect(action?.shadowRoot?.textContent).toContain('仅返回原文');
+    act(() => manager.stop());
+  });
+
+  it('attaches an explicitly selected part to only the requested current thread without confirmation', async () => {
+    document.body.innerHTML = '<article data-testid="conversation-turn-answer"><div data-message-author-role="assistant"><div class="markdown"><p id="partial-answer">候选回答的一部分</p></div></div></article>';
+    const adapter = new ChatGptAdapter(); const answer = document.querySelector('article') as HTMLElement;
+    const fingerprint = adapter.getMessageFingerprint(answer); const base = association('partial-current', 1, 1).record;
+    let current: PendingAssociation = {
+      ...base,
+      pendingThread: { ...base.pendingThread, answerMode: 'current_conversation', promptHash: 'not-a-match', candidateAnswerFingerprint: fingerprint, status: 'answer_ready' },
+      localThread: { ...base.localThread, displayId: 'PA-010', answerMode: 'current_conversation', status: 'answer_ready' },
+    };
+    const sendMessage = vi.fn().mockImplementation((message: { type: string; selectedText?: string }) => {
+      if (message.type === 'pointask:attach-answer') current = {
+        ...current, pendingThread: { ...current.pendingThread, status: 'answer_attached' },
+        localThread: { ...current.localThread, status: 'answer_attached', messages: [
+          ...current.localThread.messages,
+          { id: 'partial', role: 'assistant', content: [{ type: 'text', content: message.selectedText! }], attachedManually: true, createdAt: current.updatedAt },
+        ] },
+      };
+      return Promise.resolve({ ok: true, data: current });
+    });
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }), new ClipboardManager(undefined, () => false), adapter);
+    await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
+    const partial = [...(document.querySelector('pointask-current-answer-actions')?.shadowRoot?.querySelectorAll('button') ?? [])]
+      .find((button) => button.textContent === '框选部分附加');
+    await act(() => partial?.click());
+    expect(manager.getAttachmentAssociations().map((record) => record.pendingThread.id)).toEqual(['partial-current']);
+    const data: SelectionData = {
+      selectedText: '候选回答的一部分', paragraphText: '候选回答的一部分', messageFingerprint: fingerprint,
+      conversationKey: adapter.getConversationKey(), sourcePageUrl: window.location.href, rangeRect: new DOMRect(),
+      anchorElement: document.getElementById('partial-answer')!, sourceMessageElement: answer,
+      richSelection: { plainText: '候选回答的一部分', blocks: [{ type: 'text', content: '候选回答的一部分' }] },
+    };
+    let attached = false;
+    await act(async () => { attached = await manager.attachCurrentSelection(data, current); });
+    expect(attached).toBe(true);
+    expect(sendMessage.mock.calls.filter(([message]) => message.type === 'pointask:attach-answer')).toHaveLength(1);
+    expect(document.querySelector('pointask-answer-attachment-confirmation')).toBeNull();
+    expect(document.querySelector('pointask-current-answer-actions')).toBeNull();
     act(() => manager.stop());
   });
 

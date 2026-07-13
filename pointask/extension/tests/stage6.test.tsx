@@ -45,7 +45,7 @@ function attachedThread(id = 'pointask-multi'): LocalThread {
 describe('multi-turn prompt and thread flow', () => {
   beforeEach(() => { document.body.innerHTML = '<p id="anchor">来源段落</p>'; });
 
-  it('adds a second question, builds from local history, copies, and requests the associated URL', async () => {
+  it('adds a second question and routes it immediately from the composer send click', async () => {
     const pendingManager = new PendingThreadManager(() => new Date(timestamp), () => 'unused');
     pendingManager.restore(pending());
     let currentThread = attachedThread();
@@ -84,7 +84,8 @@ describe('multi-turn prompt and thread flow', () => {
     expect(update && 'pendingThread' in update ? update.pendingThread.generatedPrompt : '').toContain('局部回答：第一答');
     expect(update && 'pendingThread' in update ? update.pendingThread.generatedPrompt : '').toContain('我的问题：\n第二问');
     expect(writeText).not.toHaveBeenCalled();
-    expect(sent.some((message) => message.type === 'pointask:open-answer-page')).toBe(true);
+    expect(sent.some((message) => message.type === 'pointask:open-answer-page')).toBe(false);
+    expect(sent.some((message) => message.type === 'pointask:send-pending-prompt')).toBe(true);
   });
 
   it('keeps recent rounds under a deterministic history character budget', () => {

@@ -74,6 +74,24 @@ async function notify(record: PendingAssociation, tabs: TabGateway): Promise<voi
   ));
 }
 
+async function deliverExplicitSend(tabs: TabGateway, tabId: number, record: PendingAssociation): Promise<void> {
+  let lastError = '目标页面尚未准备好';
+  for (let attempt = 0; attempt < 300; attempt++) {
+    try {
+      const response = await tabs.sendMessage(tabId, {
+        type: 'pointask:execute-pending-send', pendingThreadId: record.pendingThread.id, record,
+      }) as { ok?: boolean; error?: string } | undefined;
+      if (response?.ok) return;
+      if (response?.error) throw new Error(response.error);
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : lastError;
+      if (/发送失败|不匹配|已经发送/.test(lastError)) break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(lastError === '目标页面尚未准备好' ? '追问空间暂时无法发送，请重试' : lastError);
+}
+
 function senderMatchesSource(senderUrl: string | undefined, sourceConversationKey: string): boolean {
   return Boolean(senderUrl && isCompatibleChatGptTargetUrl(sourceConversationKey, senderUrl));
 }
@@ -191,6 +209,38 @@ export async function handleRuntimeMessage(
         await notify(record, deps.tabs);
         return { ok: true, data: record };
       }
+      case 'pointask:send-pending-prompt': {
+        const existing = await ensureSourceRecord(message.pendingThreadId, senderTabId, sender.tab?.url, deps);
+        if (!existing || existing.sourceTabId !== senderTabId || existing.localThread.answerMode === 'current_conversation' ||
+          existing.pendingThread.submittedPromptHash === existing.pendingThread.promptHash) {
+          throw new Error(existing?.pendingThread.submittedPromptHash === existing?.pendingThread.promptHash
+            ? '该问题已经发送' : '当前线程无法发送，请刷新后重试');
+        }
+        const requestedUrl = existing.targetConversationUrl;
+        const tab = requestedUrl
+          ? await openOrActivateChat(deps.tabs, requestedUrl)
+          : await deps.tabs.create({ url: 'https://chatgpt.com/', active: true });
+        if (tab.id === undefined) throw new Error('无法打开追问空间，请重试');
+        const routed = deps.coordinator.markTargetOpened(message.pendingThreadId, tab.id, tab.url ?? requestedUrl ?? 'https://chatgpt.com/');
+        if (!routed || routed.pendingThread.id !== message.pendingThreadId) throw new Error('当前页面与线程不匹配');
+        await persist(routed, deps); await notify(routed, deps.tabs);
+        try {
+          await deliverExplicitSend(deps.tabs, tab.id, routed);
+        } catch (error) {
+          const current = deps.coordinator.get(message.pendingThreadId);
+          if (current?.pendingThread.submittedPromptHash === current?.pendingThread.promptHash) return { ok: true, data: current };
+          const failed = deps.coordinator.markSendFailed(message.pendingThreadId);
+          if (failed) { await persist(failed, deps); await notify(failed, deps.tabs); }
+          throw error;
+        }
+        const submitted = deps.coordinator.get(message.pendingThreadId);
+        if (!submitted || submitted.pendingThread.submittedPromptHash !== submitted.pendingThread.promptHash) {
+          const failed = deps.coordinator.markSendFailed(message.pendingThreadId);
+          if (failed) { await persist(failed, deps); await notify(failed, deps.tabs); }
+          throw new Error('发送失败，请重试');
+        }
+        return { ok: true, data: submitted };
+      }
       case 'pointask:unlink-target-page': {
         const existing = await ensureSourceRecord(message.pendingThreadId, senderTabId, sender.tab?.url, deps);
         const oldTargetTabId = existing?.targetTabId;
@@ -247,6 +297,9 @@ export async function handleRuntimeMessage(
           if (completed) { await persist(completed, deps); await notify(completed, deps.tabs); }
           if (existing.sourceTabId < 0) {
             await deps.tabs.create({ url: existing.pendingThread.sourcePageUrl, active: true });
+            return { ok: true };
+          }
+          if (existing.localThread.answerMode === 'current_conversation' && existing.sourceTabId === existing.targetTabId) {
             return { ok: true };
           }
           const options = existing.sourceTabId === existing.targetTabId
@@ -343,6 +396,12 @@ export async function handleRuntimeMessage(
         await ensureTargetRecord(message.pendingThreadId, senderTabId, sender.tab?.url, deps);
         const record = deps.coordinator.reserveSubmission(message.pendingThreadId, senderTabId, message.promptHash, message.targetUrl);
         if (!record) throw new Error('该问题已发送，或当前页面与线程不匹配');
+        await persist(record, deps); await notify(record, deps.tabs);
+        return { ok: true, data: record };
+      }
+      case 'pointask:release-prompt-submission': {
+        const record = deps.coordinator.releaseSubmission(message.pendingThreadId, senderTabId, message.promptHash);
+        if (!record) throw new Error('无法恢复本次发送状态');
         await persist(record, deps); await notify(record, deps.tabs);
         return { ok: true, data: record };
       }

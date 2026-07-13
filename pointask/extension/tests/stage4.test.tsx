@@ -40,6 +40,9 @@ describe('runtime validation', () => {
     expect(isPointAskRuntimeMessage({ type: 'pointask:create-pending-thread', pendingThread: pending() })).toBe(true);
     expect(isPointAskRuntimeMessage({ type: 'pointask:open-target-chat', pendingThreadId: '' })).toBe(false);
     expect(isPointAskRuntimeMessage({ type: 'pointask:cancel-pending-thread', pendingThreadId: 'id', extra: true })).toBe(false);
+    expect(isPointAskRuntimeMessage({ type: 'pointask:send-pending-prompt', pendingThreadId: 'thread-id' })).toBe(true);
+    expect(isPointAskRuntimeMessage({ type: 'pointask:release-prompt-submission', pendingThreadId: 'thread-id', promptHash: 'hash' })).toBe(true);
+    expect(isPointAskRuntimeMessage({ type: 'pointask:send-pending-prompt', pendingThreadId: 'thread-id', targetUrl: 'javascript:alert(1)' })).toBe(false);
     expect(isPointAskRuntimeMessage({
       type: 'pointask:associate-target-page', pendingThreadId: 'id', targetUrl: 'https://example.com/',
     })).toBe(false);
@@ -61,6 +64,17 @@ describe('pending association state', () => {
     expect(coordinator.reserveSubmission(record.pendingThread.id, 2, 'hash-one', 'https://chatgpt.com/c/target')?.pendingThread.submittedPromptHash).toBe('hash-one');
     expect(coordinator.reserveSubmission(record.pendingThread.id, 2, 'hash-one', 'https://chatgpt.com/c/target')).toBeNull();
     expect(coordinator.reserveSubmission(record.pendingThread.id, 3, 'hash-one', 'https://chatgpt.com/c/target')).toBeNull();
+  });
+
+  it('releases a reservation only after a failed submit so the user can retry', () => {
+    const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
+    const record = coordinator.create({ ...pending(), promptHash: 'hash-retry' }, 1);
+    coordinator.markTargetOpened(record.pendingThread.id, 2, 'https://chatgpt.com/c/target');
+    coordinator.reserveSubmission(record.pendingThread.id, 2, 'hash-retry', 'https://chatgpt.com/c/target');
+    const released = coordinator.releaseSubmission(record.pendingThread.id, 2, 'hash-retry');
+    expect(released?.localThread.status).toBe('waiting_for_submission');
+    expect(released?.pendingThread.submittedPromptHash).toBeUndefined();
+    expect(coordinator.reserveSubmission(record.pendingThread.id, 2, 'hash-retry', 'https://chatgpt.com/c/target')).not.toBeNull();
   });
 
   it('keeps multiple pending threads isolated by ID and tab association', () => {
@@ -160,6 +174,20 @@ describe('service worker routing', () => {
     expect(coordinator.forPage(30)).toHaveLength(0); expect(tabs.remove).toHaveBeenCalledWith(30);
   });
 
+  it('returns an attached current-conversation thread without reloading its shared source tab', async () => {
+    const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
+    const current = { ...pending('current-return'), answerMode: 'current_conversation' as const };
+    coordinator.create(current, 10); coordinator.markTargetOpened(current.id, 10, 'https://chatgpt.com/c/source');
+    coordinator.attachAnswer(current.id, 10, '回答', 'https://chatgpt.com/c/source', false);
+    const tabs = { create: vi.fn(), update: vi.fn().mockResolvedValue({}), sendMessage: vi.fn().mockResolvedValue({}) };
+    const result = await handleRuntimeMessage({ type: 'pointask:pending-thread-updated', pendingThreadId: current.id, action: 'return-source' },
+      { tab: { id: 10, url: 'https://chatgpt.com/c/source' } }, { coordinator, tabs });
+    expect(result.ok).toBe(true);
+    expect(coordinator.get(current.id)?.associationStatus).toBe('completed');
+    expect(tabs.update).not.toHaveBeenCalled();
+    expect(tabs.create).not.toHaveBeenCalled();
+  });
+
   it('reopens the stable target URL when the remembered target tab was closed', async () => {
     const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
     coordinator.create(pending(), 10); coordinator.markTargetOpened(pending().id, 20, 'https://chatgpt.com/c/target');
@@ -184,6 +212,89 @@ describe('service worker routing', () => {
     expect(tabs.update).toHaveBeenCalledWith(44, { active: true });
     expect(tabs.create).not.toHaveBeenCalled();
     expect(coordinator.get(pending().id)?.targetTabId).toBe(44);
+  });
+
+  it('sends a Workspace prompt from the source click through the exact target tab and thread once', async () => {
+    const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
+    const workspacePending = { ...pending('workspace-send'), answerMode: 'workspace' as const, workspaceId: 'workspace-one', promptHash: 'hash-workspace' };
+    coordinator.create(workspacePending, 10);
+    coordinator.markTargetOpened(workspacePending.id, 20, 'https://chatgpt.com/c/workspace');
+    const tabs = {
+      query: vi.fn().mockResolvedValue([{ id: 44, url: 'https://chatgpt.com/c/workspace' }]),
+      update: vi.fn().mockResolvedValue({}), create: vi.fn(),
+      sendMessage: vi.fn().mockImplementation((tabId: number, message: { type?: string; pendingThreadId?: string }) => {
+        if (message.type === 'pointask:execute-pending-send') {
+          const submitted = coordinator.reserveSubmission(message.pendingThreadId!, tabId, 'hash-workspace', 'https://chatgpt.com/c/workspace');
+          return Promise.resolve({ ok: Boolean(submitted) });
+        }
+        return Promise.resolve({});
+      }),
+    };
+    const result = await handleRuntimeMessage({ type: 'pointask:send-pending-prompt', pendingThreadId: workspacePending.id },
+      { tab: { id: 10, url: 'https://chatgpt.com/c/source' } }, { coordinator, tabs });
+    expect(result.ok).toBe(true);
+    expect(tabs.update).toHaveBeenCalledWith(44, { active: true });
+    expect(tabs.create).not.toHaveBeenCalled();
+    expect(tabs.sendMessage).toHaveBeenCalledWith(44, expect.objectContaining({
+      type: 'pointask:execute-pending-send', pendingThreadId: workspacePending.id,
+    }));
+    expect(coordinator.get(workspacePending.id)?.localThread.status).toBe('waiting_for_answer');
+    const duplicate = await handleRuntimeMessage({ type: 'pointask:send-pending-prompt', pendingThreadId: workspacePending.id },
+      { tab: { id: 10, url: 'https://chatgpt.com/c/source' } }, { coordinator, tabs });
+    expect(duplicate).toMatchObject({ ok: false, error: '该问题已经发送' });
+  });
+
+  it('keeps a failed Workspace question and thread retryable without submitting on recovery', async () => {
+    const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
+    const workspacePending = { ...pending('workspace-retry'), answerMode: 'workspace' as const, workspaceId: 'workspace-one', promptHash: 'hash-retry' };
+    coordinator.create(workspacePending, 10);
+    coordinator.markTargetOpened(workspacePending.id, 20, 'https://chatgpt.com/c/workspace');
+    let shouldFail = true;
+    const tabs = {
+      query: vi.fn().mockResolvedValue([{ id: 20, url: 'https://chatgpt.com/c/workspace' }]),
+      update: vi.fn().mockResolvedValue({}), create: vi.fn(),
+      sendMessage: vi.fn().mockImplementation((tabId: number, message: { type?: string; pendingThreadId?: string }) => {
+        if (message.type !== 'pointask:execute-pending-send') return Promise.resolve({});
+        if (shouldFail) return Promise.resolve({ ok: false, error: '发送失败，请重试' });
+        return Promise.resolve({ ok: Boolean(coordinator.reserveSubmission(message.pendingThreadId!, tabId, 'hash-retry', 'https://chatgpt.com/c/workspace')) });
+      }),
+    };
+    const first = await handleRuntimeMessage({ type: 'pointask:send-pending-prompt', pendingThreadId: workspacePending.id },
+      { tab: { id: 10, url: 'https://chatgpt.com/c/source' } }, { coordinator, tabs });
+    expect(first.ok).toBe(false);
+    expect(coordinator.get(workspacePending.id)).toMatchObject({
+      pendingThread: { question: workspacePending.question, status: 'failed' },
+      localThread: { id: workspacePending.id, status: 'failed' },
+    });
+    expect(coordinator.get(workspacePending.id)?.pendingThread.submittedPromptHash).toBeUndefined();
+
+    shouldFail = false;
+    const retried = await handleRuntimeMessage({ type: 'pointask:send-pending-prompt', pendingThreadId: workspacePending.id },
+      { tab: { id: 10, url: 'https://chatgpt.com/c/source' } }, { coordinator, tabs });
+    expect(retried.ok).toBe(true);
+    expect(coordinator.get(workspacePending.id)?.pendingThread.submittedPromptHash).toBe('hash-retry');
+  });
+
+  it('creates the first Workspace conversation from the explicit mode confirmation when none is associated yet', async () => {
+    const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
+    const workspacePending = { ...pending('workspace-first-send'), answerMode: 'workspace' as const, workspaceId: 'workspace-new', promptHash: 'hash-first' };
+    coordinator.create(workspacePending, 10);
+    const tabs = {
+      create: vi.fn().mockResolvedValue({ id: 55, url: 'https://chatgpt.com/' }), update: vi.fn(), query: vi.fn(),
+      sendMessage: vi.fn().mockImplementation((tabId: number, message: { type?: string; pendingThreadId?: string }) => {
+        if (message.type === 'pointask:execute-pending-send') {
+          const submitted = coordinator.reserveSubmission(message.pendingThreadId!, tabId, 'hash-first', 'https://chatgpt.com/');
+          return Promise.resolve({ ok: Boolean(submitted) });
+        }
+        return Promise.resolve({});
+      }),
+    };
+    const result = await handleRuntimeMessage({ type: 'pointask:send-pending-prompt', pendingThreadId: workspacePending.id },
+      { tab: { id: 10, url: 'https://chatgpt.com/c/source' } }, { coordinator, tabs });
+    expect(result.ok).toBe(true);
+    expect(tabs.create).toHaveBeenCalledWith({ url: 'https://chatgpt.com/', active: true });
+    expect(tabs.query).not.toHaveBeenCalled();
+    expect(coordinator.get(workspacePending.id)).toMatchObject({ targetTabId: 55, targetConversationUrl: 'https://chatgpt.com/' });
   });
 
   it('does not activate a remembered tab after it navigated away from the associated conversation', async () => {
@@ -351,7 +462,7 @@ describe('web bridge and pending banner', () => {
     const first = new PendingBannerManager(bridge, clipboard);
     await act(async () => { await first.start(); });
     expect(document.querySelector('pointask-pending-thread-banner')?.shadowRoot?.textContent)
-      .toContain('这是一个等待回答的 PointAsk 局部线程');
+      .toContain('正在等待回答……');
     await act(() => first.stop());
 
     const refreshed = new PendingBannerManager(bridge, clipboard);

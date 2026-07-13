@@ -12,6 +12,7 @@ import { stableTextHash } from '../src/shared/text-utils';
 import { MemoryStorageDriver } from '../src/storage/storage-driver';
 import { NavigationStore } from '../src/storage/navigation-store';
 import { applyPointAskTheme } from '../src/content/theme';
+import { threadStyles } from '../src/content/shadow-styles';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -66,6 +67,36 @@ describe('rich ChatGPT content', () => {
     expect(container.querySelector('blockquote')?.textContent).toContain('引用');
     expect(container.querySelector('pre code')?.textContent).toContain('const value = 1;');
     expect(container.querySelector('table')).not.toBeNull();
+    expect(richContentStyles).not.toContain('#0d0d0d');
+    expect(richContentStyles).toContain('background: var(--pa-bg-subtle');
+    await act(() => root.unmount());
+  });
+
+  it('keeps rendered ChatGPT emphasis in RichContent and cards', async () => {
+    document.body.innerHTML = '<p id="formatted">普通 <strong>粗体 <em>粗斜体</em></strong> 和 <del>删除内容</del></p>';
+    const selection = document.createRange(); selection.selectNodeContents(document.getElementById('formatted')!);
+    const rich = extractRichContent(selection);
+    expect(rich.blocks).toEqual([{ type: 'paragraph', children: [
+      { type: 'text', content: '普通 ' },
+      { type: 'strong', children: [
+        { type: 'text', content: '粗体 ' },
+        { type: 'emphasis', children: [{ type: 'text', content: '粗斜体' }] },
+      ] },
+      { type: 'text', content: ' 和 ' },
+      { type: 'strikethrough', children: [{ type: 'text', content: '删除内容' }] },
+    ] }]);
+    const container = document.createElement('div'); const root = createRoot(container);
+    await act(() => root.render(<RichContentRenderer blocks={rich.blocks} />));
+    expect(container.querySelector('strong')?.textContent).toBe('粗体 粗斜体');
+    expect(container.querySelector('strong')?.tagName).toBe('STRONG');
+    expect(container.querySelector('strong em')?.textContent).toBe('粗斜体');
+    expect(container.querySelector('del')?.textContent).toBe('删除内容');
+    expect(richContentStyles).toContain('.pointask-rich-content strong,');
+    expect(richContentStyles).toContain('font-size: inherit; line-height: inherit; font-family: inherit; letter-spacing: inherit; font-weight: 600;');
+    expect(threadStyles).toContain('.pointask-message > strong { font-size: 12px; }');
+    expect(threadStyles).toContain('.pointask-selection > strong { font-size: 12px; }');
+    expect(threadStyles).not.toContain('.pointask-message strong { font-size: 12px; }');
+    expect(threadStyles).not.toContain('.pointask-selection strong { font-size: 12px; }');
     await act(() => root.unmount());
   });
 
@@ -101,6 +132,44 @@ describe('rich ChatGPT content', () => {
     expect(container.querySelector('p')?.textContent).toBe('令 x；再令 x=2。');
     expect(container.querySelector('pre code')?.textContent).toBe('if (x) {\n  run();\n}');
     await act(() => root.unmount());
+  });
+
+  it('preserves structure for partial list, inline-code, and code-block selections', () => {
+    document.body.innerHTML = `<div id="partial"><ol start="4"><li><p>第一项</p></li><li><p id="chosen">第二项中间文字</p></li></ol>
+      <p id="inline">值为 <code id="inline-code">alphaBeta</code>。</p>
+      <pre><code id="lines" class="language-js">lineOne();\n  lineTwo();\nlineThree();</code></pre></div>`;
+    const chosen = document.getElementById('chosen')!.firstChild!;
+    const listRich = extractRichContent(range(chosen, 2, chosen, 6));
+    expect(listRich.blocks).toEqual([{ type: 'ordered_list', start: 5, items: [{ type: 'list_item', children: [
+      { type: 'paragraph', children: [{ type: 'text', content: '项中间文' }] },
+    ] }] }]);
+
+    const inline = document.getElementById('inline-code')!.firstChild!;
+    expect(extractRichContent(range(inline, 2, inline, 7)).blocks).toEqual([{ type: 'paragraph', children: [
+      { type: 'inline_code', content: 'phaBe' },
+    ] }]);
+
+    const lines = document.getElementById('lines')!.firstChild as Text;
+    const codeRich = extractRichContent(range(lines, lines.data.indexOf('  lineTwo'), lines, lines.data.indexOf('lineThree') - 1));
+    expect(codeRich.blocks).toEqual([{ type: 'code_block', content: '  lineTwo();', language: 'js' }]);
+  });
+
+  it('preserves mixed text, lists, partial code, and paragraph content across blocks', () => {
+    document.body.innerHTML = `<div id="mixed"><p id="intro">普通文字开始</p><ul><li><p>列表内容</p></li></ul>
+      <pre><code id="mixed-code">  first();\n  second();</code></pre><p id="tail">结尾文字</p></div>`;
+    const intro = document.getElementById('intro')!.firstChild!;
+    const tail = document.getElementById('tail')!.firstChild!;
+    const rich = extractRichContent(range(intro, 2, tail, 2));
+    expect(rich.blocks.map((block) => block.type)).toEqual(['paragraph', 'unordered_list', 'code_block', 'paragraph']);
+    expect(rich.blocks[2]).toEqual({ type: 'code_block', content: '  first();\n  second();' });
+    expect(rich.plainText).toContain('文字开始');
+    expect(rich.plainText).toContain('列表内容');
+    expect(rich.plainText).toContain('结尾');
+
+    const code = document.getElementById('mixed-code')!.firstChild as Text;
+    const fromCode = extractRichContent(range(code, 2, tail, 2));
+    expect(fromCode.blocks.map((block) => block.type)).toEqual(['code_block', 'paragraph']);
+    expect(fromCode.blocks[0]).toEqual({ type: 'code_block', content: 'first();\n  second();' });
   });
 
   it('cleans consecutive and edge line breaks while preserving formula/list structure', () => {

@@ -8,7 +8,7 @@ import { normalizeRichContentBlocks } from '../shared/rich-content';
 
 const katexAssetBase = typeof chrome !== 'undefined' && chrome.runtime?.getURL ? chrome.runtime.getURL('assets/') : '/assets/';
 export const richContentStyles = `${katexCss.replaceAll('url(/assets/', `url(${katexAssetBase}`)}
-.pointask-rich-content { max-width: 100%; overflow-wrap: anywhere; line-height: 1.55; }
+.pointask-rich-content { max-width: 100%; overflow-wrap: anywhere; line-height: 1.65; }
 .pointask-rich-content .pointask-markdown-block { margin: 6px 0; }
 .pointask-rich-content .pointask-markdown-block:first-child { margin-top: 0; }
 .pointask-rich-content .pointask-markdown-block:last-child { margin-bottom: 0; }
@@ -18,18 +18,25 @@ export const richContentStyles = `${katexCss.replaceAll('url(/assets/', `url(${k
 .pointask-rich-content :where(ul, ol) { padding-left: 1.5em; }
 .pointask-rich-content li + li { margin-top: .2em; }
 .pointask-rich-content li > p { margin: .2em 0; }
+.pointask-rich-content li::marker { color: var(--pa-text, currentColor); }
+.pointask-rich-content strong,
+.pointask-rich-content b { font-size: inherit; line-height: inherit; font-family: inherit; letter-spacing: inherit; font-weight: 600; }
+.pointask-rich-content :is(strong, b) > span { font-size: inherit; line-height: inherit; font-family: inherit; letter-spacing: inherit; }
+.pointask-rich-content :where(em, i) { font-style: italic; }
+.pointask-rich-content hr { height: 1px; margin: 1em 0; border: 0; background: var(--pa-border, #d0d7de); }
+.pointask-rich-content input[type="checkbox"] { margin: 0 .45em 0 0; vertical-align: -.08em; accent-color: var(--pa-accent, #10a37f); }
 .pointask-rich-content blockquote { padding: .15em .7em; border-left: 2px solid var(--pa-border, #9aa0a6); color: var(--pa-muted, #666); }
 .pointask-rich-content a { color: var(--pa-accent, #0969da); text-decoration: underline; }
 .pointask-rich-content .pointask-table-scroll { max-width: 100%; overflow-x: auto; margin: .65em 0; }
 .pointask-rich-content table { width: max-content; min-width: min(100%, 360px); border-collapse: collapse; }
 .pointask-rich-content :where(th, td) { padding: 5px 8px; border: 1px solid var(--pa-border, #d0d7de); text-align: left; }
 .pointask-rich-content th { background: var(--pa-bg-subtle, #f3f4f6); }
-.pointask-rich-content code { border-radius: 4px; padding: .1em .28em; background: var(--pa-bg-subtle, #eff1f3); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .92em; }
+.pointask-rich-content code { border-radius: 5px; padding: .12em .3em; background: var(--pa-bg-subtle, #eff1f3); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: .875em; }
 .pointask-rich-content .pointask-inline-math { display: inline-block; max-width: 100%; vertical-align: middle; }
 .pointask-rich-content .pointask-block-math { display: block; max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
 .pointask-rich-content .katex, .pointask-rich-content .katex * { white-space: nowrap; }
-.pointask-rich-content pre { max-width: 100%; overflow: auto; margin: .65em 0; padding: 10px 12px; border-radius: 8px; color: #e6edf3; background: #161b22; white-space: pre; }
-.pointask-rich-content pre code { padding: 0; color: inherit; background: transparent; white-space: pre; }
+.pointask-rich-content pre { box-sizing: border-box; max-width: 100%; overflow: auto; margin: .75em 0; padding: 12px 14px; border: 1px solid var(--pa-border, #dedee3); border-radius: 8px; color: var(--pa-text, #202123); background: var(--pa-bg-subtle, #f7f7f8); direction: ltr; text-align: left; white-space: pre; tab-size: 4; }
+.pointask-rich-content pre code { display: block; min-width: max-content; padding: 0; color: inherit; background: transparent; font-size: .875em; line-height: 1.55; white-space: pre; overflow-wrap: normal; }
 .pointask-rich-content del { color: #656d76; }
 `;
 
@@ -84,6 +91,9 @@ function RenderBlocks({ blocks, inline = false }: { blocks: RichContentBlock[]; 
   return blocks.map((block, index) => {
     if (block.type === 'line_break') return <br key={index} />;
     if (block.type === 'text') return inline ? <InlineMarkdownText key={index} value={block.content} /> : <MarkdownText key={index} value={block.content} />;
+    if (block.type === 'strong') return <strong key={index}><RenderBlocks blocks={block.children} inline /></strong>;
+    if (block.type === 'emphasis') return <em key={index}><RenderBlocks blocks={block.children} inline /></em>;
+    if (block.type === 'strikethrough') return <del key={index}><RenderBlocks blocks={block.children} inline /></del>;
     if (block.type === 'inline_code') return <code className="pointask-inline-code" key={index}>{block.content}</code>;
     if (block.type === 'code' || block.type === 'code_block') return <pre key={index}><code data-language={block.language}>{block.content}</code></pre>;
     if (block.type === 'inline_math' || block.type === 'block_math') return <MathBlock key={index} latex={block.latex} displayMode={block.type === 'block_math'} />;

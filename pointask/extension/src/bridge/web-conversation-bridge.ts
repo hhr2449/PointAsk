@@ -1,5 +1,5 @@
 import type { PendingThread } from './pending-thread-manager';
-import { isPendingAssociationUpdate, type PendingAssociation, type PointAskRuntimeMessage } from './runtime-messages';
+import { isExecutePendingSendMessage, isPendingAssociationUpdate, type PendingAssociation, type PointAskRuntimeMessage } from './runtime-messages';
 import type { AnswerSourceLocator, RichContentBlock } from '../shared/local-thread';
 import type { PendingNavigation } from '../storage/navigation-store';
 import { isExtensionContextInvalidated } from '../storage/storage-driver';
@@ -7,8 +7,8 @@ import { isExtensionContextInvalidated } from '../storage/storage-driver';
 interface RuntimeMessenger {
   sendMessage(message: PointAskRuntimeMessage): Promise<unknown>;
   onMessage?: {
-    addListener(callback: (message: unknown) => void): void;
-    removeListener(callback: (message: unknown) => void): void;
+    addListener(callback: (message: unknown, sender?: unknown, sendResponse?: (response: unknown) => void) => unknown): void;
+    removeListener(callback: (message: unknown, sender?: unknown, sendResponse?: (response: unknown) => void) => unknown): void;
   };
 }
 
@@ -103,6 +103,12 @@ export class WebConversationBridge {
   async reservePromptSubmission(pendingThreadId: string, promptHash: string, targetUrl = window.location.href): Promise<PendingAssociation> {
     return this.send({ type: 'pointask:reserve-prompt-submission', pendingThreadId, promptHash, targetUrl });
   }
+  async releasePromptSubmission(pendingThreadId: string, promptHash: string): Promise<PendingAssociation> {
+    return this.send({ type: 'pointask:release-prompt-submission', pendingThreadId, promptHash });
+  }
+  async sendPendingPrompt(pendingThreadId: string): Promise<PendingAssociation> {
+    return this.send({ type: 'pointask:send-pending-prompt', pendingThreadId });
+  }
 
   onPendingUpdated(callback: (record: PendingAssociation) => void): () => void {
     const listener = (message: unknown) => {
@@ -115,6 +121,19 @@ export class WebConversationBridge {
   onNavigationReady(callback: () => void): () => void {
     const listener = (message: unknown) => {
       if (message && typeof message === 'object' && (message as { type?: unknown }).type === 'pointask:navigation-ready') callback();
+    };
+    this.runtime.onMessage?.addListener(listener);
+    return () => this.runtime.onMessage?.removeListener(listener);
+  }
+
+  onExecutePendingSend(callback: (record: PendingAssociation) => Promise<boolean>): () => void {
+    const listener = (message: unknown, _sender?: unknown, sendResponse?: (response: unknown) => void) => {
+      if (!isExecutePendingSendMessage(message)) return false;
+      void callback(message.record).then(
+        (success) => sendResponse?.({ ok: success, error: success ? undefined : '发送失败，请重试' }),
+        (error: unknown) => sendResponse?.({ ok: false, error: error instanceof Error ? error.message : '发送失败，请重试' }),
+      );
+      return true;
     };
     this.runtime.onMessage?.addListener(listener);
     return () => this.runtime.onMessage?.removeListener(listener);

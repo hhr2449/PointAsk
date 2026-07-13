@@ -18,6 +18,8 @@ export interface SelectionData {
   textAnchor?: TextAnchor;
   richSelection?: RichSelection;
   assistantFingerprintsBefore?: string[];
+  /** A snapshot captured on mouseup, before toolbar interaction can collapse the DOM selection. */
+  selectionRange?: Range;
 }
 
 export type SelectionHandler = (data: SelectionData | null) => void;
@@ -39,7 +41,32 @@ function isInsidePointAsk(node: Node): boolean {
   return elementFromNode(node)?.closest(POINTASK_HOST_SELECTOR) !== null;
 }
 
+function coveredNodes(range: Range): Node[] {
+  const root = range.commonAncestorContainer;
+  const nodes: Node[] = [root];
+  if (root.nodeType === Node.TEXT_NODE) return nodes;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    try {
+      if (range.intersectsNode(node)) nodes.push(node);
+    } catch {
+      // A detached or browser-owned node cannot be trusted as selection input.
+    }
+  }
+  return nodes;
+}
+
 function offsetWithin(root: HTMLElement, container: Node, offset: number): number {
+  if (container === root || root.contains(container)) {
+    try {
+      const prefix = document.createRange();
+      prefix.selectNodeContents(root);
+      prefix.setEnd(container, offset);
+      return prefix.toString().length;
+    } catch {
+      // Fall through to the text walker for unusual browser DOM boundaries.
+    }
+  }
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   let total = 0;
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
@@ -69,21 +96,24 @@ export function readSelection(
   void captureAssistantContext;
   if (!adapter.isSupportedPage() || !selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
 
-  const rawSelectedText = selection.toString().trim();
-  if (rawSelectedText.length > MAX_SELECTION_LENGTH) return null;
   const range = typeof adapter.normalizeSelectionRange === 'function'
     ? adapter.normalizeSelectionRange(selection.getRangeAt(0)) : selection.getRangeAt(0).cloneRange();
+  const selectionRange = range.cloneRange();
+  const nodes = coveredNodes(range);
+  if (nodes.some(isEditable) || nodes.some(isInsidePointAsk)) return null;
   const richSelection = typeof adapter.getRichSelection === 'function'
     ? adapter.getRichSelection(range)
-    : { plainText: rawSelectedText, blocks: rawSelectedText ? [{ type: 'text', content: rawSelectedText }] : [] } as RichSelection;
+    : (() => {
+      const value = range.toString();
+      return { plainText: value.trim(), blocks: value.trim() ? [{ type: 'text', content: value }] : [] } as RichSelection;
+    })();
   const selectedText = richSelection.plainText.trim();
   if (!selectedText || selectedText.length > MAX_SELECTION_LENGTH) return null;
-  if (isEditable(range.startContainer) || isEditable(range.endContainer)) return null;
-  if (isInsidePointAsk(range.startContainer) || isInsidePointAsk(range.endContainer)) return null;
 
+  const messages = new Set(nodes.map((node) => adapter.findAssistantMessage(node)).filter((message): message is HTMLElement => Boolean(message)));
   const startMessage = adapter.findAssistantMessage(range.startContainer);
   const endMessage = adapter.findAssistantMessage(range.endContainer);
-  if (!startMessage || startMessage !== endMessage) return null;
+  if (!startMessage || startMessage !== endMessage || messages.size !== 1 || !messages.has(startMessage)) return null;
 
   const content = adapter.getMessageContent(startMessage);
   if (!content || !content.contains(range.startContainer) || !content.contains(range.endContainer)) return null;
@@ -131,6 +161,7 @@ export function readSelection(
     textAnchor,
     richSelection,
     assistantFingerprintsBefore: adapter.getAssistantMessageFingerprints(),
+    selectionRange,
   };
 }
 
@@ -144,10 +175,11 @@ export function hydrateSelectionContext(adapter: SiteAdapter, data: SelectionDat
 export class SelectionManager {
   private cleanupObserver: (() => void) | null = null;
   private started = false;
+  private preserveCollapsedSelection = false;
   private readonly onMouseUp = () => queueMicrotask(() => this.emitCurrentSelection());
   private readonly onSelectionChange = () => {
     const selection = window.getSelection();
-    if (!selection || selection.isCollapsed) this.onSelection(null);
+    if ((!selection || selection.isCollapsed) && !this.preserveCollapsedSelection) this.onSelection(null);
   };
   private readonly onInvalidate = () => this.onSelection(null);
 
@@ -191,7 +223,13 @@ export class SelectionManager {
   };
 
   private readonly onPointerDown = (event: PointerEvent) => {
-    if (!isInsidePointAsk(event.target as Node)) this.onSelection(null);
+    if (!isInsidePointAsk(event.target as Node)) {
+      this.preserveCollapsedSelection = false;
+      this.onSelection(null);
+      return;
+    }
+    this.preserveCollapsedSelection = true;
+    setTimeout(() => { this.preserveCollapsedSelection = false; }, 0);
   };
 
   private emitCurrentSelection(): void {

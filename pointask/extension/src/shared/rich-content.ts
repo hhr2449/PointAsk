@@ -4,7 +4,9 @@ export function textBlocks(value: string): RichContentBlock[] {
   return value.trim() ? [{ type: 'text', content: value }] : [];
 }
 
-const inlineTypes = new Set<RichContentBlock['type']>(['text', 'inline_code', 'inline_math']);
+const inlineTypes = new Set<RichContentBlock['type']>([
+  'text', 'inline_code', 'inline_math', 'strong', 'emphasis', 'strikethrough',
+]);
 
 function normalizeSequence(values: RichContentBlock[], nested = false): RichContentBlock[] {
   const result: RichContentBlock[] = [];
@@ -33,9 +35,11 @@ function normalizeBlock(block: RichContentBlock): RichContentBlock | null {
   }
   if (block.type === 'inline_math' || block.type === 'block_math') return block.latex ? block : null;
   if (block.type === 'line_break') return block;
-  if (block.type === 'paragraph' || block.type === 'blockquote' || block.type === 'list_item' || block.type === 'heading' || block.type === 'table_cell') {
+  if (block.type === 'strong' || block.type === 'emphasis' || block.type === 'strikethrough'
+    || block.type === 'paragraph' || block.type === 'blockquote' || block.type === 'list_item' || block.type === 'heading' || block.type === 'table_cell') {
     const children = normalizeSequence(block.children, true);
     if (!children.length) return null;
+    if (block.type === 'strong' || block.type === 'emphasis' || block.type === 'strikethrough') return { type: block.type, children };
     if (block.type === 'heading') return { type: 'heading', level: block.level, children };
     if (block.type === 'table_cell') return { type: 'table_cell', children, ...(block.header ? { header: true } : {}) };
     return { type: block.type, children };
@@ -101,8 +105,10 @@ export function normalizeRichBlocks(value: unknown): RichContentBlock[] | null {
       return { type, content: block.content, ...(block.language ? { language: block.language as string } : {}) };
     }
     if ((type === 'inline_math' || type === 'block_math') && typeof block.latex === 'string') return { type, latex: block.latex };
-    if ((type === 'paragraph' || type === 'blockquote' || type === 'list_item' || type === 'heading' || type === 'table_cell') && Array.isArray(block.children)) {
+    if ((type === 'strong' || type === 'emphasis' || type === 'strikethrough'
+      || type === 'paragraph' || type === 'blockquote' || type === 'list_item' || type === 'heading' || type === 'table_cell') && Array.isArray(block.children)) {
       const children = block.children.map(parse); if (children.some((item) => !item)) return null;
+      if (type === 'strong' || type === 'emphasis' || type === 'strikethrough') return { type, children: children as RichContentBlock[] };
       if (type === 'heading') return Number.isInteger(block.level) && Number(block.level) >= 1 && Number(block.level) <= 6
         ? { type, level: Number(block.level) as 1 | 2 | 3 | 4 | 5 | 6, children: children as RichContentBlock[] } : null;
       if (type === 'table_cell') return block.header === undefined || typeof block.header === 'boolean'

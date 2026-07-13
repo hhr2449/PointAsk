@@ -14,6 +14,7 @@ import { WebConversationBridge } from '../src/bridge/web-conversation-bridge';
 import { InlineThreadManager } from '../src/content/inline-thread-manager';
 import type { SelectionData } from '../src/content/selection-manager';
 import type { Root } from 'react-dom/client';
+import type { SiteAdapter } from '../src/adapters/site-adapter';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 const now = '2026-07-12T00:00:00.000Z';
@@ -90,6 +91,36 @@ describe('workspace and display IDs', () => {
 });
 
 describe('mode navigation behavior', () => {
+  it('uses the current-page send click as confirmation and blocks duplicate submission', async () => {
+    document.body.innerHTML = '<p id="pointask-test-anchor">来源</p>';
+    const pendingManager = new PendingThreadManager(() => new Date(now), () => 'current-send');
+    let record: import('../src/bridge/runtime-messages').PendingAssociation | undefined;
+    const runtime = { sendMessage: vi.fn().mockImplementation((message: { type: string; pendingThread?: import('../src/bridge/pending-thread-manager').PendingThread; localThread?: LocalThread; promptHash?: string }) => {
+      if (message.type === 'pointask:create-pending-thread') record = { pendingThread: message.pendingThread!, localThread: message.localThread!, sourceTabId: 1,
+        associationStatus: 'created', createdAt: now, updatedAt: now };
+      if (message.type === 'pointask:associate-target-page' && record) record = { ...record, targetTabId: 1, targetConversationUrl: anchor.sourcePageUrl,
+        associationStatus: 'associated', pendingThread: { ...record.pendingThread, targetConversationUrl: anchor.sourcePageUrl, targetTabId: 1 },
+        localThread: { ...record.localThread, targetConversationUrl: anchor.sourcePageUrl, status: 'waiting_for_submission' } };
+      if (message.type === 'pointask:reserve-prompt-submission' && record) record = { ...record,
+        pendingThread: { ...record.pendingThread, submittedPromptHash: message.promptHash, status: 'waiting_for_answer' },
+        localThread: { ...record.localThread, status: 'waiting_for_answer' } };
+      return Promise.resolve({ ok: true, data: record });
+    }) };
+    const adapter = {
+      getConversationKey: () => anchor.conversationKey, fillComposer: vi.fn().mockReturnValue(true), canSubmitComposer: vi.fn().mockReturnValue(true),
+      submitComposer: vi.fn().mockReturnValue(true), getAssistantMessageFingerprints: () => [], getScrollContainer: () => window,
+    } as unknown as SiteAdapter;
+    const manager = new InlineThreadManager(pendingManager, new ClipboardManager(undefined, () => false), new WebConversationBridge(runtime),
+      () => ({ render: vi.fn(), unmount: vi.fn() }) as unknown as Root, () => new Date(now), undefined, undefined, undefined, undefined, adapter);
+    const id = await manager.create(selectionData(), '当前页面直接发送', 'current_conversation');
+    const sent = await manager.confirmAnswerModeAndSend(id!);
+    expect(sent).toBe(true);
+    expect(adapter.fillComposer).toHaveBeenCalledOnce(); expect(adapter.submitComposer).toHaveBeenCalledOnce();
+    expect(manager.getThread(id!)?.status).toBe('waiting_for_answer');
+    expect(await manager.sendCurrentConversation(id!)).toBe(false);
+    expect(adapter.submitComposer).toHaveBeenCalledOnce();
+  });
+
   it('does not request a new tab for current_conversation and reuses a Workspace target', async () => {
     document.body.innerHTML = '<p id="pointask-test-anchor">来源</p>';
     const driver = new MemoryStorageDriver();
@@ -118,7 +149,7 @@ describe('mode navigation behavior', () => {
       contextState: { contextVersion: 1, unsyncedMessageCount: 0, unsyncedTurnCount: 0, status: 'unknown' } });
     const workspaceId = await manager.create(selectionData(), 'Workspace 问题', 'workspace');
     await manager.startAnswerFlow(workspaceId!);
-    expect(calls.some((call) => call.type === 'pointask:open-answer-page')).toBe(true);
+    expect(calls.some((call) => call.type === 'pointask:open-answer-page')).toBe(false);
     expect(manager.getThread(workspaceId!)?.workspaceId).toBe('workspace');
 
     const dedicatedId = await manager.create(selectionData(), '独立分支问题', 'dedicated_branch');
@@ -131,7 +162,7 @@ describe('mode navigation behavior', () => {
     });
     const openCount = calls.filter((call) => call.type === 'pointask:open-answer-page').length;
     await manager.startAnswerFlow(dedicatedId!);
-    expect(calls.filter((call) => call.type === 'pointask:open-answer-page')).toHaveLength(openCount + 1);
+    expect(calls.filter((call) => call.type === 'pointask:open-answer-page')).toHaveLength(openCount);
   });
 });
 

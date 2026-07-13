@@ -194,19 +194,16 @@ export class ChatGptAdapter implements SiteAdapter {
   }
 
   private getSelectedBlocks(range: Range): HTMLElement[] {
-    const selectedBlock = (node: Node) => elementFromNode(node)?.closest(BLOCK_SELECTOR) ?? elementFromNode(node)?.closest(STANDALONE_MATH_SELECTOR);
-    const start = selectedBlock(range.startContainer);
-    const end = selectedBlock(range.endContainer);
-    if (!(start instanceof HTMLElement) || !(end instanceof HTMLElement)) return [];
-    if (start === end) return [start];
-    const startContent = start.closest(CONTENT_SELECTOR);
-    const endContent = end.closest(CONTENT_SELECTOR);
-    if (!startContent || startContent !== endContent) return [];
-    const blocks = [...startContent.querySelectorAll<HTMLElement>(`${BLOCK_SELECTOR}, ${STANDALONE_MATH_SELECTOR}`)]
+    const startMessage = this.findAssistantMessage(range.startContainer);
+    const endMessage = this.findAssistantMessage(range.endContainer);
+    if (!startMessage || startMessage !== endMessage) return [];
+    const content = this.getMessageContent(startMessage);
+    if (!content) return [];
+    const blocks = [...content.querySelectorAll<HTMLElement>(`${BLOCK_SELECTOR}, ${STANDALONE_MATH_SELECTOR}`)]
       .filter((block) => !block.parentElement?.closest(BLOCK_SELECTOR));
-    const startIndex = blocks.indexOf(start);
-    const endIndex = blocks.indexOf(end);
-    return startIndex >= 0 && endIndex >= startIndex ? blocks.slice(startIndex, endIndex + 1) : [];
+    return blocks.filter((block) => {
+      try { return range.intersectsNode(block); } catch { return false; }
+    });
   }
 
   resolveTextAnchor(anchor: TextAnchor, pageReady = true): AnchorResolution {

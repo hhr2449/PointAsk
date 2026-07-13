@@ -1,6 +1,6 @@
 # PointAsk
 
-PointAsk is a Chrome extension for asking focused follow-up questions about text selected in a ChatGPT answer. It routes a locally generated prompt to the chosen ChatGPT page; only after the user clicks “fill composer” does it modify the composer, and the user remains responsible for sending and attaching the answer.
+PointAsk is a Chrome extension for asking focused follow-up questions about text selected in a ChatGPT answer. The question composer lets the user choose the current conversation or a shared follow-up Workspace; its explicit “发送” click creates and submits exactly one pending prompt to that destination. Answer attachment remains a separate user action.
 
 PointAsk requires no API key and no backend. Its intended application data is stored locally with `chrome.storage.local`.
 
@@ -35,7 +35,7 @@ Threads and Workspaces survive page refreshes and tab replacement. Conversation 
 
 ## User-control boundary
 
-PointAsk never sends on page load, restoration, timers, or background activity. After a one-time authorization, it may fill and submit exactly one pending prompt only when the user clicks an explicitly labelled send button. It never calls a model API, uses a private ChatGPT endpoint, reads authentication data, or attaches an answer without a distinct user click.
+PointAsk never sends on page load, restoration, timers, or background activity. The explicitly labelled send button is the confirmation for exactly one pending prompt; prompt hashes and thread IDs prevent refreshes or repeated clicks from submitting it twice. It never calls a model API, uses a private ChatGPT endpoint, reads authentication data, or attaches an answer without a distinct user click.
 
 ## Structure
 

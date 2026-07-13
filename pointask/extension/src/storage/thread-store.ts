@@ -50,6 +50,11 @@ export class ThreadStore {
         : thread,
     ));
   }
+  async setExpanded(id: string, expanded: boolean, updatedAt: string): Promise<void> {
+    await this.mutate((threads) => threads.map((thread) =>
+      thread.id === id && thread.expanded !== expanded ? { ...thread, expanded, updatedAt } : thread,
+    ));
+  }
   subscribe(callback: () => void): () => void {
     return this.driver.subscribe?.(STORAGE_KEYS.threads, callback) ?? (() => undefined);
   }

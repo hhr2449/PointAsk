@@ -8,7 +8,7 @@ import { ThreadCard } from '../components/thread-card';
 import type { LocalMessage, LocalThread, TextAnchor } from '../shared/local-thread';
 import { stableTextHash } from '../shared/text-utils';
 import type { SelectionData } from './selection-manager';
-import { threadStyles } from './shadow-styles';
+import { threadMenuOverlayStyles, threadStyles } from './shadow-styles';
 import type { ThreadStore } from '../storage/thread-store';
 import type { PendingStore } from '../storage/pending-store';
 import type { MetricsStore } from '../storage/metrics-store';
@@ -60,13 +60,16 @@ function toAnchor(data: SelectionData): TextAnchor {
 
 export class InlineThreadManager {
   private readonly mounted = new Map<string, MountedThread>();
-  private expandedId: string | null = null;
+  private readonly expandedIds = new Set<string>();
   private continueHandler: ((id: string, thread: LocalThread, anchorElement: HTMLElement) => void) | null = null;
   private defaultPromptMode: PromptMode = 'compact';
   private expandNewThreads = false;
   private currentConversationScrollBehavior: 'stay_at_source' | 'follow_response' = 'stay_at_source';
   private readonly viewAnchors = new Map<string, ViewAnchorController>();
+  private readonly highlightTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly sendingIds = new Set<string>();
+  private readonly menuOverlayHost: HTMLElement;
+  private readonly menuOverlay: HTMLElement;
   private workspaceContextHandler: ((workspace: PointAskWorkspace, threadId: string) => void) | null = null;
 
   constructor(
@@ -81,7 +84,14 @@ export class InlineThreadManager {
     private readonly workspaceStore?: WorkspaceStore,
     private readonly siteAdapter?: SiteAdapter,
     private readonly operationAuthorizer?: OperationAuthorizer,
-  ) {}
+  ) {
+    this.menuOverlayHost = document.createElement('pointask-thread-menu-overlay');
+    this.menuOverlayHost.dataset.pointaskOwned = 'true';
+    const shadow = this.menuOverlayHost.attachShadow({ mode: 'open' });
+    const style = document.createElement('style'); style.textContent = threadMenuOverlayStyles;
+    this.menuOverlay = document.createElement('div'); this.menuOverlay.className = 'pointask-thread-menu-overlay';
+    shadow.append(style, this.menuOverlay); document.documentElement.append(this.menuOverlayHost);
+  }
 
   async create(
     data: SelectionData,
@@ -172,8 +182,9 @@ export class InlineThreadManager {
       updatedAt: timestamp,
     };
     this.mount(thread, data.anchorElement);
-    this.expandedId = this.expandNewThreads ? thread.id : null;
-    thread.expanded = this.expandedId === thread.id;
+    if (this.expandNewThreads) this.expandedIds.add(thread.id);
+    else this.expandedIds.delete(thread.id);
+    thread.expanded = this.expandedIds.has(thread.id);
     this.renderAll();
     await Promise.all([this.threadStore?.upsert(thread), this.pendingStore?.upsert(pending), this.metrics?.increment('questionsCreated')]);
     return thread.id;
@@ -193,18 +204,46 @@ export class InlineThreadManager {
         if (waiting) await this.webBridge.updateLocalThread(waiting, item.thread);
         void Promise.all([this.threadStore?.upsert(item.thread), waiting && this.pendingStore?.upsert(waiting)]);
         this.render(id);
-        if (pending.viewAnchor && this.currentConversationScrollBehavior === 'stay_at_source') {
-          const controller = new ViewAnchorController();
-          controller.start(item.anchorElement, pending.viewAnchor, this.siteAdapter?.getScrollContainer(item.anchorElement) ?? window);
-          this.viewAnchors.set(id, controller);
-        }
         return true;
       } catch (error) {
         item.error = error instanceof Error ? error.message : '无法关联当前对话'; this.render(id); return false;
       }
     }
-    if (item.thread.targetConversationUrl) return this.copyAndOpenTarget(id);
     return true;
+  }
+
+  async confirmAnswerModeAndSend(id: string): Promise<boolean> {
+    if (!(await this.startAnswerFlow(id))) return false;
+    const mode = this.mounted.get(id)?.thread.answerMode;
+    if (mode === 'current_conversation') return this.sendCurrentConversation(id);
+    return this.sendAssociatedConversation(id);
+  }
+
+  private async recordSendFailure(id: string, error: unknown): Promise<void> {
+    const item = this.mounted.get(id);
+    const pending = this.pendingThreads.get(id);
+    if (!item || !pending) return;
+    item.error = error instanceof Error ? error.message : '发送失败，请重试';
+    if (pending.submittedPromptHash === pending.promptHash) return;
+    const failedPending = this.pendingThreads.markFailed(id);
+    if (!failedPending) return;
+    item.thread = { ...item.thread, status: 'failed', updatedAt: this.now().toISOString() };
+    await Promise.all([
+      this.threadStore?.upsert(item.thread),
+      this.pendingStore?.upsert(failedPending),
+      this.webBridge?.updateLocalThread(failedPending, item.thread).catch(() => undefined),
+    ]);
+  }
+
+  private placeHost(anchorElement: HTMLElement, host: HTMLElement): void {
+    let sibling = anchorElement.nextElementSibling;
+    let lastOwned: Element = anchorElement;
+    while (sibling?.matches('pointask-inline-thread[data-pointask-owned="true"]')) {
+      if (sibling === host) return;
+      lastOwned = sibling;
+      sibling = sibling.nextElementSibling;
+    }
+    lastOwned.insertAdjacentElement('afterend', host);
   }
 
   mount(thread: LocalThread, anchorElement: HTMLElement): boolean {
@@ -212,8 +251,9 @@ export class InlineThreadManager {
     if (existing?.host.isConnected) {
       existing.thread = thread;
       existing.anchorElement = anchorElement;
-      if (existing.host.previousElementSibling !== anchorElement) anchorElement.insertAdjacentElement('afterend', existing.host);
-      if (thread.expanded) this.expandedId = thread.id;
+      this.placeHost(anchorElement, existing.host);
+      if (thread.expanded) this.expandedIds.add(thread.id);
+      else this.expandedIds.delete(thread.id);
       this.render(thread.id);
       return false;
     }
@@ -222,35 +262,49 @@ export class InlineThreadManager {
     host.dataset.pointaskOwned = 'true';
     host.dataset.pointaskThreadId = thread.id;
     applyPointAskTheme(host, anchorElement);
+    applyPointAskTheme(this.menuOverlayHost, anchorElement);
     const shadow = host.attachShadow({ mode: 'open' });
     const style = document.createElement('style');
     style.textContent = `${threadStyles}\n${richContentStyles}`;
     const mount = document.createElement('div');
     shadow.append(style, mount);
-    anchorElement.insertAdjacentElement('afterend', host);
+    this.placeHost(anchorElement, host);
     this.mounted.set(thread.id, { host, root: this.rootFactory(mount), thread, copied: false, manualBranch: false, anchorElement });
     if (thread.workspaceId && this.workspaceStore) void this.workspaceStore.get(thread.workspaceId).then((workspace) => {
       const mounted = this.mounted.get(thread.id); if (mounted && workspace) { mounted.workspace = workspace; this.render(thread.id); }
     });
-    const restoredPending = this.pendingThreads.get(thread.id);
-    if (thread.answerMode === 'current_conversation' && restoredPending?.viewAnchor && this.currentConversationScrollBehavior === 'stay_at_source' &&
-      ['waiting_for_submission', 'waiting_for_answer', 'generating', 'answer_ready'].includes(thread.status)) {
-      const controller = new ViewAnchorController(); controller.start(anchorElement, restoredPending.viewAnchor, this.siteAdapter?.getScrollContainer(anchorElement) ?? window); this.viewAnchors.set(thread.id, controller);
-    }
-    if (thread.expanded) this.expandedId = thread.id;
+    if (thread.expanded) this.expandedIds.add(thread.id);
+    else this.expandedIds.delete(thread.id);
     this.render(thread.id);
     return true;
   }
 
   toggle(id: string): void {
-    this.expandedId = this.expandedId === id ? null : id;
     const item = this.mounted.get(id);
-    if (item) {
-      item.thread = { ...item.thread, expanded: this.expandedId === id, updatedAt: this.now().toISOString() };
-      void this.threadStore?.upsert(item.thread);
-    }
+    if (!item) return;
+    const viewportTop = item.host.getBoundingClientRect().top;
+    const timestamp = this.now().toISOString();
+    if (this.expandedIds.has(id)) this.expandedIds.delete(id);
+    else this.expandedIds.add(id);
+    const expanded = this.expandedIds.has(id);
+    item.thread = { ...item.thread, expanded, updatedAt: timestamp };
+    void this.threadStore?.setExpanded(id, expanded, timestamp);
     void this.metrics?.increment('threadsExpanded');
-    this.renderAll();
+    this.render(id);
+    this.stabilizeCardPosition(id, viewportTop);
+  }
+
+  private stabilizeCardPosition(id: string, viewportTop: number): void {
+    const schedule = window.requestAnimationFrame?.bind(window) ?? ((callback: FrameRequestCallback) => window.setTimeout(() => callback(performance.now()), 0));
+    schedule(() => {
+      const item = this.mounted.get(id);
+      if (!item?.host.isConnected) return;
+      const delta = item.host.getBoundingClientRect().top - viewportTop;
+      if (Math.abs(delta) < 1) return;
+      const target = this.siteAdapter?.getScrollContainer(item.anchorElement) ?? window;
+      if (typeof target.scrollBy === 'function') target.scrollBy({ top: delta, behavior: 'auto' });
+      else if (target instanceof HTMLElement) target.scrollTop += delta;
+    });
   }
 
   async copy(id: string): Promise<boolean> {
@@ -296,27 +350,51 @@ export class InlineThreadManager {
   }
 
   async sendCurrentConversation(id: string): Promise<boolean> {
-    const item = this.mounted.get(id); const pending = this.pendingThreads.get(id);
+    const item = this.mounted.get(id); let pending = this.pendingThreads.get(id);
     if (!item || !pending || item.thread.answerMode !== 'current_conversation' || !this.webBridge || !this.siteAdapter || this.sendingIds.has(id)) return false;
     if (pending.submittedPromptHash === pending.promptHash) { item.error = '该问题已经发送'; this.render(id); return false; }
-    if (this.operationAuthorizer && !(await this.operationAuthorizer.authorize())) return false;
-    this.sendingIds.add(id); item.error = undefined; this.render(id);
+    this.sendingIds.add(id); item.error = undefined;
+    pending = this.pendingThreads.markWaitingForSubmission(id) ?? pending;
+    item.thread = { ...item.thread, status: 'waiting_for_submission', updatedAt: this.now().toISOString() };
+    this.render(id);
     try {
       if (this.siteAdapter.getConversationKey() !== item.thread.sourceConversationKey) throw new Error('当前页面与线程不匹配');
-      if (!this.siteAdapter.fillComposer(pending.generatedPrompt)) throw new Error('无法填入输入框');
+      if (!this.siteAdapter.fillComposer(pending.generatedPrompt)) throw new Error('当前对话暂时无法发送，请重试');
       let ready = this.siteAdapter.canSubmitComposer();
       for (let attempt = 0; !ready && attempt < 10; attempt++) {
         await new Promise((resolve) => setTimeout(resolve, 50)); ready = this.siteAdapter.canSubmitComposer();
       }
       if (!ready) throw new Error('发送按钮当前不可用');
       const record = await this.webBridge.reservePromptSubmission(id, pending.promptHash ?? '', window.location.href);
-      if (!this.siteAdapter.submitComposer()) throw new Error('发送未完成；为避免重复提交，本轮不会自动重试');
+      if (!this.siteAdapter.submitComposer()) {
+        await this.webBridge.releasePromptSubmission(id, pending.promptHash ?? '').catch(() => undefined);
+        throw new Error('发送失败，请重试');
+      }
       this.pendingThreads.restore(record.pendingThread); item.thread = record.localThread;
       void Promise.all([this.threadStore?.upsert(item.thread), this.pendingStore?.upsert(record.pendingThread)]);
       showOperationToast('已发送'); this.render(id); return true;
     } catch (error) {
-      item.error = error instanceof Error ? error.message : '操作失败，请重试'; this.render(id); return false;
-    } finally { this.sendingIds.delete(id); }
+      await this.recordSendFailure(id, error); return false;
+    } finally { this.sendingIds.delete(id); this.render(id); }
+  }
+
+  async sendAssociatedConversation(id: string): Promise<boolean> {
+    const item = this.mounted.get(id); let pending = this.pendingThreads.get(id);
+    if (!item || !pending || item.thread.answerMode === 'current_conversation' || !this.webBridge || this.sendingIds.has(id)) return false;
+    if (pending.submittedPromptHash === pending.promptHash) { item.error = '该问题已经发送'; this.render(id); return false; }
+    this.sendingIds.add(id); item.error = undefined;
+    pending = this.pendingThreads.markWaitingForSubmission(id) ?? pending;
+    item.thread = { ...item.thread, status: 'waiting_for_submission', updatedAt: this.now().toISOString() };
+    this.render(id);
+    try {
+      await this.webBridge.savePendingThread(pending, item.thread);
+      const record = await this.webBridge.sendPendingPrompt(id);
+      this.pendingThreads.restore(record.pendingThread); item.thread = record.localThread;
+      void Promise.all([this.threadStore?.upsert(item.thread), this.pendingStore?.upsert(record.pendingThread)]);
+      showOperationToast('已发送'); this.render(id); return true;
+    } catch (error) {
+      await this.recordSendFailure(id, error); return false;
+    } finally { this.sendingIds.delete(id); this.render(id); }
   }
 
   async prepareManualBranch(id: string): Promise<boolean> {
@@ -365,7 +443,8 @@ export class InlineThreadManager {
     this.viewAnchors.get(id)?.stop(); this.viewAnchors.delete(id);
     item.host.remove();
     this.mounted.delete(id);
-    if (this.expandedId === id) this.expandedId = null;
+    this.expandedIds.delete(id);
+    const highlightTimer = this.highlightTimers.get(id); if (highlightTimer) clearTimeout(highlightTimer); this.highlightTimers.delete(id);
   }
 
   handleAssociationUpdate(record: PendingAssociation): void {
@@ -378,6 +457,7 @@ export class InlineThreadManager {
     this.pendingThreads.restore(record.pendingThread);
     const wasAttached = item.thread.status === 'answer_attached';
     item.thread = record.localThread;
+    if (item.thread.status !== 'failed') item.error = undefined;
     if (item.thread.answerMode === 'dedicated_branch' && record.targetConversationUrl) {
       item.thread = { ...item.thread, dedicatedConversationUrl: record.targetConversationUrl };
     }
@@ -388,6 +468,15 @@ export class InlineThreadManager {
         targetConversationKey: record.targetConversationUrl,
         updatedAt: this.now().toISOString(),
       }));
+    }
+    if (!wasAttached && item.thread.status === 'answer_attached' && item.thread.answerMode === 'current_conversation') {
+      this.expandedIds.add(item.thread.id);
+      item.thread = { ...item.thread, expanded: true };
+      item.host.classList.add('pointask-thread-highlight');
+      const previousTimer = this.highlightTimers.get(item.thread.id); if (previousTimer) clearTimeout(previousTimer);
+      this.highlightTimers.set(item.thread.id, setTimeout(() => {
+        item.host.classList.remove('pointask-thread-highlight'); this.highlightTimers.delete(item.thread.id);
+      }, 1_800));
     }
     void this.threadStore?.upsert(item.thread);
     if (!wasAttached && item.thread.status === 'answer_attached') void this.metrics?.increment('answersAttached');
@@ -452,27 +541,8 @@ export class InlineThreadManager {
     if (!this.webBridge) return true;
     try {
       await this.webBridge.updateLocalThread(pending, item.thread);
-      if (item.thread.answerMode === 'current_conversation') {
-        const waiting = this.pendingThreads.markWaitingForSubmission(id);
-        if (waiting) {
-          await this.webBridge.savePendingThread(waiting, item.thread);
-          const record = await this.webBridge.associateCurrentPage(id, window.location.href, true);
-          item.thread = record.localThread;
-          if (waiting.viewAnchor && this.currentConversationScrollBehavior === 'stay_at_source') {
-            const controller = new ViewAnchorController(); controller.start(item.anchorElement, waiting.viewAnchor, this.siteAdapter?.getScrollContainer(item.anchorElement) ?? window);
-            this.viewAnchors.set(id, controller);
-          }
-        }
-      } else if (item.thread.targetConversationUrl) {
-        const record = await this.webBridge.openAnswerPage(id);
-        item.thread = record.localThread;
-        const waiting = this.pendingThreads.markWaitingForSubmission(id);
-        if (waiting) await this.webBridge.savePendingThread(waiting, item.thread);
-      } else {
-        item.error = '当前线程没有关联页面，请创建新的目标页面。';
-      }
       this.render(id);
-      return true;
+      return this.confirmAnswerModeAndSend(id);
     } catch (error) {
       item.error = error instanceof Error ? error.message : '无法继续追问';
       this.render(id);
@@ -580,11 +650,23 @@ export class InlineThreadManager {
       this.viewAnchors.get(id)?.stop(); this.viewAnchors.delete(id);
       item.host.remove();
       this.mounted.delete(id);
+      this.expandedIds.delete(id);
+      const highlightTimer = this.highlightTimers.get(id); if (highlightTimer) clearTimeout(highlightTimer); this.highlightTimers.delete(id);
     }
   }
 
   getThread(id: string): LocalThread | null { return this.mounted.get(id)?.thread ?? null; }
   getHost(id: string): HTMLElement | null { return this.mounted.get(id)?.host ?? null; }
+  reveal(id: string): boolean {
+    const item = this.mounted.get(id);
+    if (!item?.host.isConnected) return false;
+    const timestamp = this.now().toISOString();
+    this.expandedIds.add(id); item.thread = { ...item.thread, expanded: true, updatedAt: timestamp };
+    void this.threadStore?.setExpanded(id, true, timestamp); this.render(id);
+    const schedule = window.requestAnimationFrame?.bind(window) ?? ((callback: FrameRequestCallback) => window.setTimeout(() => callback(performance.now()), 0));
+    schedule(() => item.host.isConnected && item.host.scrollIntoView?.({ behavior: 'smooth', block: 'center' }));
+    return true;
+  }
   focus(id: string): void {
     setTimeout(() => this.mounted.get(id)?.host.shadowRoot?.querySelector<HTMLButtonElement>('.pointask-toggle')?.focus());
   }
@@ -601,11 +683,14 @@ export class InlineThreadManager {
         copied={item.copied}
         error={item.error}
         manualBranch={item.manualBranch}
-        expanded={this.expandedId === id}
+        expanded={this.expandedIds.has(id)}
+        sending={this.sendingIds.has(id)}
+        menuOverlay={this.menuOverlay}
         onToggle={() => this.toggle(id)}
         onDelete={() => this.delete(id)}
         onCopy={() => void this.copy(id)}
-        onOpenTarget={() => void (item.thread.answerMode === 'current_conversation' ? this.sendCurrentConversation(id) : this.copyAndOpenTarget(id))}
+        onOpenTarget={() => void (item.thread.answerMode === 'current_conversation' ? this.sendCurrentConversation(id)
+          : this.sendAssociatedConversation(id))}
         onManualBranch={() => void this.prepareManualBranch(id)}
         onCancel={() => this.cancel(id)}
         onOpenAnswer={() => {
@@ -627,25 +712,14 @@ export class InlineThreadManager {
         })}
         onGoCandidate={() => {
           const candidate = this.pendingThreads.get(id)?.candidateAnswerFingerprint;
-          if (!candidate || !this.webBridge) return;
+          if (!candidate) { window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' }); return; }
+          const localCandidate = this.siteAdapter?.findAssistantMessageByFingerprint(candidate);
+          if (localCandidate) { localCandidate.scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
+          if (!this.webBridge) return;
           void this.webBridge.navigateToAnswer(id, {
             conversationUrl: item.thread.targetConversationUrl ?? item.thread.sourcePageUrl,
             conversationKey: item.thread.targetConversationUrl ?? item.thread.sourceConversationKey,
             messageFingerprint: candidate,
-          });
-        }}
-        onAttachCandidate={() => {
-          const pending = this.pendingThreads.get(id); const fingerprint = pending?.candidateAnswerFingerprint;
-          if (!fingerprint || !this.siteAdapter || !this.webBridge) return;
-          const element = this.siteAdapter.findAssistantMessageByFingerprint(fingerprint);
-          if (!element || this.siteAdapter.isMessageStreaming(element)) return;
-          const rich = this.siteAdapter.getMessageRichContent(element);
-          void this.webBridge.attachAnswer(id, rich.plainText, false, window.location.href, rich.blocks, {
-            conversationUrl: window.location.href,
-            conversationKey: this.siteAdapter.getConversationKey(),
-            messageFingerprint: fingerprint,
-          }).then((record) => this.handleAssociationUpdate(record)).catch((error: unknown) => {
-            item.error = error instanceof Error ? error.message : '附加失败'; this.render(id);
           });
         }}
         onUpdateWorkspaceContext={() => item.workspace && this.workspaceContextHandler?.(item.workspace, id)}

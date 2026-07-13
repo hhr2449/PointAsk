@@ -21,28 +21,31 @@ export const composerStyles = `${sharedShadowStyles}
   .pointask-quote { max-height: 72px; overflow: auto; margin: 0 0 10px; padding: 7px 9px; border-left: 2px solid var(--pa-accent); background: var(--pa-bg-subtle); color: var(--pa-muted); font-size: 13px; }
   .pointask-label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 650; }
   textarea { width: 100%; resize: vertical; min-height: 76px; max-height: 180px; padding: 9px; border: 1px solid var(--pa-border); border-radius: 8px; color: inherit; background: var(--pa-bg-subtle); }
+  .pointask-answer-mode { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin: 9px 0 0; padding: 0; border: 0; }
+  .pointask-answer-mode legend { grid-column: 1 / -1; margin-bottom: 5px; color: var(--pa-muted); font-size: 12px; font-weight: 650; }
+  .pointask-answer-mode label { display: flex; align-items: flex-start; gap: 7px; padding: 8px; border: 1px solid var(--pa-border); border-radius: 8px; cursor: pointer; }
+  .pointask-answer-mode label:has(input:checked) { border-color: var(--pa-accent); background: var(--pa-bg-subtle); }
+  .pointask-answer-mode input { margin: 2px 0 0; }
+  .pointask-answer-mode span { display: grid; gap: 2px; font-size: 12px; }
+  .pointask-answer-mode small { color: var(--pa-muted); line-height: 1.3; }
   .pointask-footer, .pointask-actions { display: flex; align-items: center; }
   .pointask-footer { justify-content: space-between; gap: 12px; margin-top: 9px; }
   .pointask-actions { gap: 8px; }
-  output { color: #666; font-size: 12px; }
+  output { color: var(--pa-muted); font-size: 12px; }
   .pointask-error { color: #b42318; }
 `;
 
 export const threadStyles = `${sharedShadowStyles}
-  :host { display: block; width: 100%; margin: 10px 0; }
+  :host { display: block; width: 100%; margin: 10px 0; overflow-anchor: none; }
+  :host(.pointask-thread-highlight) pointask-thread-card { outline: 3px solid #10a37f; outline-offset: 3px; transition: outline-color .25s ease; }
   pointask-thread-card { display: block; width: min(680px, 100%); margin-inline: auto; border: 1px solid var(--pa-border); border-radius: var(--pa-radius); color: var(--pa-text); background: color-mix(in srgb, var(--pa-bg) 96%, transparent); }
   .pointask-thread-header { display: flex; align-items: stretch; min-width: 0; }
   .pointask-header-actions { display: flex; align-items: center; gap: 3px; padding-right: 5px; }
   .pointask-quick { border: 0; border-radius: 7px; padding: 6px 9px; background: transparent; white-space: nowrap; }
   .pointask-quick:hover { background: var(--pa-hover); }
   .pointask-primary-action { color: var(--pa-text); font-weight: 600; }
-  .pointask-more { position: relative; }
-  .pointask-more > summary { cursor: pointer; list-style: none; padding: 5px 8px; border-radius: 7px; font-weight: 700; }
-  .pointask-more > summary:hover { background: var(--pa-hover); }
-  .pointask-more-menu { position: absolute; z-index: 3; top: calc(100% + 4px); right: 0; display: grid; min-width: 190px; padding: 5px; border: 1px solid var(--pa-border); border-radius: 9px; color: var(--pa-text); background: var(--pa-bg); box-shadow: var(--pa-shadow); }
-  .pointask-more-menu button { border: 0; padding: 8px; background: transparent; text-align: left; }
-  .pointask-more-menu button:hover { background: var(--pa-hover); }
-  .pointask-more-menu .pointask-danger { color: var(--pa-danger); }
+  .pointask-more-trigger { border: 0; border-radius: 7px; padding: 5px 8px; background: transparent; font-weight: 700; user-select: none; -webkit-user-select: none; }
+  .pointask-more-trigger:hover, .pointask-more-trigger[aria-expanded="true"] { background: var(--pa-hover); }
   .pointask-toggle { display: flex; flex: 1; min-width: 0; align-items: center; gap: 9px; padding: 10px 11px; border: 0; color: inherit; background: transparent; text-align: left; }
   .pointask-toggle:hover { background: var(--pa-hover); }
   .pointask-summary { display: flex; flex: 1; min-width: 0; gap: 7px; align-items: baseline; }
@@ -59,10 +62,10 @@ export const threadStyles = `${sharedShadowStyles}
   .pointask-error-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
   .pointask-message { margin: 12px 0; padding: 0; }
   .pointask-selection { margin: 10px 0; padding: 8px 10px; border-left: 2px solid var(--pa-border); color: var(--pa-muted); }
-  .pointask-selection strong { font-size: 12px; }
+  .pointask-selection > strong { font-size: 12px; }
   .pointask-selection-content { margin: 4px 0 0; overflow-wrap: anywhere; }
   .pointask-assistant { color: var(--pa-text); }
-  .pointask-message strong { font-size: 12px; }
+  .pointask-message > strong { font-size: 12px; }
   .pointask-message-content { margin: 4px 0 0; }
   .pointask-copy-state { color: var(--pa-muted); font-size: 12px; }
   .pointask-card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
@@ -74,6 +77,15 @@ export const threadStyles = `${sharedShadowStyles}
   @media (max-width: 520px) { .pointask-count { display: none; } .pointask-header-actions { max-width: 42%; } .pointask-quick { overflow:hidden;text-overflow:ellipsis; } .pointask-thread-body { padding-inline: 10px; } }
 `;
 
+export const threadMenuOverlayStyles = `${sharedShadowStyles}
+  :host { position: fixed; z-index: 2147483647; inset: 0; width: 0; height: 0; pointer-events: none; }
+  .pointask-thread-menu-overlay { position: fixed; z-index: 2147483647; inset: 0; pointer-events: none; }
+  .pointask-more-menu { position: fixed; z-index: 2147483647; display: grid; min-width: 190px; max-width: calc(100vw - 16px); padding: 5px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--pa-border); border-radius: 9px; color: var(--pa-text); background: var(--pa-bg); box-shadow: var(--pa-shadow); pointer-events: auto; visibility: hidden; }
+  .pointask-more-menu button { border: 0; border-radius: 6px; padding: 8px; color: inherit; background: transparent; text-align: left; white-space: nowrap; }
+  .pointask-more-menu button:hover, .pointask-more-menu button:focus-visible { background: var(--pa-hover); }
+  .pointask-more-menu .pointask-danger { color: var(--pa-danger); }
+`;
+
 export const bannerStyles = `${sharedShadowStyles}
   :host { position: fixed; z-index: 2147483646; top: 12px; right: 12px; width: min(380px, calc(100vw - 24px)); pointer-events: none; }
   .pointask-banner-list { display: grid; gap: 10px; max-height: calc(100vh - 24px); overflow: auto; }
@@ -83,6 +95,17 @@ export const bannerStyles = `${sharedShadowStyles}
   .pointask-banner-close { position: absolute; top: 6px; right: 7px; border: 0; padding: 2px 6px; color: #666; background: transparent; font-size: 20px; }
   .pointask-banner-actions { display: flex; flex-wrap: wrap; gap: 7px; }
   .pointask-banner-feedback { min-height: 18px; margin-top: 6px; color: var(--pa-muted); font-size: 12px; }
+`;
+
+export const currentAnswerActionStyles = `${sharedShadowStyles}
+  :host { display: block; width: 100%; margin: 8px 0 14px; }
+  .pointask-current-answer-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: min(760px, 100%); margin-inline: auto; padding: 8px 10px; border: 1px solid var(--pa-border); border-radius: 9px; color: var(--pa-text); background: var(--pa-bg); box-shadow: 0 4px 14px rgb(0 0 0 / 8%); font-size: 12px; }
+  .pointask-current-answer-label { display: grid; flex: 1; min-width: 90px; gap: 2px; }
+  .pointask-current-answer-label span { color: var(--pa-muted); }
+  .pointask-current-answer-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+  .pointask-current-answer-buttons button { white-space: nowrap; }
+  .pointask-error { flex-basis: 100%; margin: 4px 0 0; color: var(--pa-danger); }
+  @media (max-width: 620px) { .pointask-current-answer-actions { align-items: stretch; flex-direction: column; } .pointask-current-answer-buttons { justify-content: flex-start; } }
 `;
 
 export const attachmentConfirmationStyles = `${sharedShadowStyles}

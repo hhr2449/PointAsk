@@ -2,6 +2,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChatGptAdapter } from '../src/adapters/chatgpt-adapter';
 import type { SiteAdapter } from '../src/adapters/site-adapter';
 import { MAX_SELECTION_LENGTH, readSelection, SelectionManager } from '../src/content/selection-manager';
+import { SelectionToolbar } from '../src/content/selection-toolbar';
 import { chatGptFixture } from './fixtures/chatgpt';
 
 function text(id: string): Text {
@@ -101,15 +102,60 @@ describe('ChatGPT selection boundary', () => {
     expect(result?.paragraphText).toContain('第二段脱敏回答');
   });
 
-  it('rejects overlong selected text before message extraction', () => {
-    const range = rangeBetween(text('assistant-first'), 0);
-    expect(readSelection(adapter, fakeSelection(range, '字'.repeat(MAX_SELECTION_LENGTH + 1)))).toBeNull();
+  it('rejects overlong selected content without relying on Selection.toString()', () => {
+    const node = text('assistant-first');
+    node.data = '字'.repeat(MAX_SELECTION_LENGTH + 1);
+    const range = rangeBetween(node, 0);
+    expect(readSelection(adapter, fakeSelection(range, '伪造的短文本'))).toBeNull();
   });
 
   it('fails closed when the adapter cannot identify a message', () => {
     const range = rangeBetween(text('assistant-first'), 0);
     const uncertainAdapter = { ...adapter, isSupportedPage: () => true, findAssistantMessage: () => null } as unknown as SiteAdapter;
     expect(readSelection(uncertainAdapter, fakeSelection(range))).toBeNull();
+  });
+
+  it('supports element boundaries, partial list items, and selections across list items', () => {
+    document.body.innerHTML = `<article data-testid="conversation-turn-list"><div data-message-author-role="assistant"><div class="markdown">
+      <ol id="list" start="3"><li><p><span id="list-one">第一项目内容</span></p></li><li><p><span id="list-two">第二项目内容</span></p></li></ol>
+    </div></div></article>`;
+    const list = document.getElementById('list')!;
+    const one = document.getElementById('list-one')!.firstChild!;
+    const two = document.getElementById('list-two')!.firstChild!;
+
+    const fromNumber = document.createRange(); fromNumber.setStart(list, 0); fromNumber.setEnd(one, 4);
+    const numberResult = readSelection(adapter, fakeSelection(fromNumber));
+    expect(numberResult?.richSelection?.blocks[0]).toMatchObject({ type: 'ordered_list', start: 3 });
+    expect(numberResult?.selectedText).toBe('第一项目');
+
+    const across = rangeBetween(one as Text, 2, two as Text, 4);
+    const acrossResult = readSelection(adapter, fakeSelection(across));
+    expect(acrossResult?.richSelection?.blocks[0]).toMatchObject({
+      type: 'ordered_list', start: 3, items: [{ type: 'list_item' }, { type: 'list_item' }],
+    });
+    expect(acrossResult?.selectedText).toContain('项目内容');
+    expect(acrossResult?.selectedText).toContain('第二项目');
+  });
+
+  it('keeps a captured Range and rich code content after the browser selection collapses', () => {
+    document.body.innerHTML = `<article data-testid="conversation-turn-code"><div data-message-author-role="assistant"><div class="markdown">
+      <pre><code id="partial-code" class="language-ts">const alpha = 1;\n  const beta = 2;\nreturn beta;</code></pre>
+    </div></div></article>`;
+    const code = document.getElementById('partial-code')!.firstChild as Text;
+    const sourceRange = rangeBetween(code, 6, code, code.data.indexOf('return') - 1);
+    const data = readSelection(adapter, fakeSelection(sourceRange));
+    expect(data?.selectionRange).not.toBe(sourceRange);
+    expect(data?.selectionRange?.toString()).toContain('alpha = 1;\n  const beta = 2');
+    expect(data?.richSelection?.blocks[0]).toMatchObject({ type: 'code_block', language: 'ts' });
+
+    const onFollowUp = vi.fn();
+    const toolbar = new SelectionToolbar({ onFollowUp, onAttach: vi.fn() });
+    toolbar.show(data!);
+    window.getSelection()?.removeAllRanges();
+    const button = document.querySelector('pointask-selection-toolbar')?.shadowRoot?.querySelector('button') as HTMLButtonElement;
+    button.click();
+    expect(onFollowUp.mock.calls[0]?.[0].selectionRange.toString()).toContain('const beta = 2');
+    toolbar.destroy();
   });
 });
 

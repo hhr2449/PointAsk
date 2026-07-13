@@ -32,11 +32,13 @@ export function PendingThreadBanner({
         const pending = record.pendingThread;
         const manual = record.associationStatus === 'awaiting_manual_association';
         const attached = record.localThread.status === 'answer_attached';
+        const failed = record.localThread.status === 'failed' || pending.status === 'failed';
         const candidate = candidates.get(pending.id);
         return (
           <section className="pointask-banner" key={pending.id}>
             <button type="button" className="pointask-banner-close" aria-label="关闭提示条" onClick={() => onClose(pending.id)}>×</button>
-            <strong>{manual ? '关联手动分支' : attached ? '回答已附加到 PointAsk。' : '这是一个等待回答的 PointAsk 局部线程。'}</strong>
+            <strong>{manual ? '关联手动分支' : attached ? '已附加' : candidate && !candidate.streaming ? '回答已生成' : failed ? '发送失败' :
+              pending.submittedPromptHash === pending.promptHash ? '正在等待回答……' : '正在发送……'}</strong>
             <div className="pointask-banner-source">来源：{pending.richSelection ? <RichContentRenderer blocks={pending.richSelection.blocks} /> : `“${summary(pending.anchor.selectedText)}”`}</div>
             <p><b>线程：</b>{record.localThread.displayId}</p>
             <p><b>问题：</b>{pending.question}</p>
@@ -63,26 +65,27 @@ export function PendingThreadBanner({
               </div>
             ) : candidate ? (
               <>
-                <p>{candidate.streaming ? '回答生成中' : '已可靠定位到此线程的新回答。请选择附加方式。'}</p>
+                <p>{candidate.streaming ? '正在等待回答……' : '已可靠定位到此线程的新回答。请选择附加方式。'}</p>
                 <div className="pointask-banner-actions">
                   <button type="button" className="pointask-primary" disabled={candidate.streaming} onClick={() => onAttachWhole(pending.id)}>一键附加整条回答</button>
                   <button type="button" className="pointask-secondary" onClick={() => onSelectPartial(pending.id)}>框选部分附加</button>
                   <button type="button" className="pointask-secondary" onClick={() => onReturn(pending.id)}>返回原文</button>
                 </div>
               </>
+            ) : failed ? (
+              <><p>{errors.get(pending.id) || '发送失败，请重试。'}</p><div className="pointask-banner-actions">
+                <button type="button" className="pointask-primary" onClick={() => onFill(pending.id)}>重新发送</button>
+                <button type="button" className="pointask-secondary" onClick={() => onReturn(pending.id)}>返回原文</button>
+              </div></>
             ) : pending.submittedPromptHash === pending.promptHash ? (
-              <><p>已发送，正在等待回答。</p><div className="pointask-banner-actions">
+              <><p>正在等待回答……</p><div className="pointask-banner-actions">
                 <button type="button" className="pointask-secondary" onClick={() => onReturn(pending.id)}>返回原文</button>
                 <button type="button" className="pointask-secondary" onClick={() => onCancel(pending.id)}>取消等待</button>
               </div></>
             ) : (
               <>
-                <p>发送只会在你点击下方按钮后执行；恢复页面不会自动发送。</p>
+                <p>正在发送……</p>
                 <div className="pointask-banner-actions">
-                  <button type="button" className="pointask-primary" onClick={() => onFill(pending.id)}>
-                    {record.localThread.answerMode === 'current_conversation' ? '发送到当前对话' : '发送到追问空间'}
-                  </button>
-                  <button type="button" className="pointask-secondary" onClick={() => onSelectPartial(pending.id)}>前往选择回答</button>
                   <button type="button" className="pointask-secondary" onClick={() => onReturn(pending.id)}>返回来源页面</button>
                   <button type="button" className="pointask-secondary" onClick={() => onCancel(pending.id)}>取消关联</button>
                 </div>

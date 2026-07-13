@@ -1,7 +1,10 @@
 import type { RichContentBlock, RichSelection } from '../shared/local-thread';
 import { normalizeRichContentBlocks, richPlainText, textBlocks } from '../shared/rich-content';
 
-const ATOM_SELECTOR = '.katex, math, pre, code';
+// Math is rendered from several nested DOM nodes but represents one semantic
+// value. Code is deliberately not atomic: users may select any part of it.
+const MATH_ATOM_SELECTOR = '.katex, math';
+const RICH_CONTEXT_SELECTOR = 'p, blockquote, ol, ul, li, pre, code, h1, h2, h3, h4, h5, h6, table, th, td';
 
 function elementFromNode(node: Node): Element | null {
   return node.nodeType === Node.ELEMENT_NODE ? node as Element : node.parentElement;
@@ -18,11 +21,57 @@ export function expandRangeToRichAtoms(input: Range): Range {
   const range = input.cloneRange();
   const findAtom = (node: Node) => {
     const element = elementFromNode(node);
-    return element?.closest('.katex-display') ?? element?.closest(ATOM_SELECTOR);
+    return element?.closest('.katex-display') ?? element?.closest(MATH_ATOM_SELECTOR);
   };
   const startAtom = findAtom(range.startContainer); const endAtom = findAtom(range.endContainer);
   if (startAtom) range.setStartBefore(startAtom); if (endAtom) range.setEndAfter(endAtom);
   return range;
+}
+
+function containsBoundary(element: Element, container: Node): boolean {
+  return element === container || element.contains(container);
+}
+
+/**
+ * Range.cloneContents() intentionally omits a common ancestor. Recreate the
+ * semantic ancestor path for selections wholly inside a list, code block,
+ * quote, paragraph, etc. so a partial selection remains structured.
+ */
+function cloneRichContents(range: Range): DocumentFragment {
+  const fragment = range.cloneContents();
+  const commonElement = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+    ? range.commonAncestorContainer as Element
+    : range.commonAncestorContainer.parentElement;
+  if (!commonElement) return fragment;
+
+  const contexts: Element[] = [];
+  for (let current: Element | null = commonElement; current; current = current.parentElement) {
+    if (current.matches(RICH_CONTEXT_SELECTOR)
+      && containsBoundary(current, range.startContainer)
+      && containsBoundary(current, range.endContainer)) contexts.push(current);
+    if (current.matches('.markdown, [data-message-content]')) break;
+  }
+  const outermost = contexts.at(-1);
+  if (!outermost) return fragment;
+
+  let wrapped: Node = fragment;
+  for (let current: Element | null = commonElement; current; current = current.parentElement) {
+    const wrapper = current.cloneNode(false) as Element;
+    if (wrapper.matches('ol')) {
+      const firstSelectedItem = elementFromNode(range.startContainer)?.closest('li');
+      if (firstSelectedItem?.parentElement === current) {
+        const originalStart = Number(current.getAttribute('start') ?? 1);
+        const itemIndex = [...current.children].filter((child) => child.matches('li')).indexOf(firstSelectedItem);
+        if (itemIndex > 0) wrapper.setAttribute('start', String(originalStart + itemIndex));
+      }
+    }
+    wrapper.append(wrapped);
+    wrapped = wrapper;
+    if (current === outermost) break;
+  }
+  const result = document.createDocumentFragment();
+  result.append(wrapped);
+  return result;
 }
 
 function children(element: Element | DocumentFragment): RichContentBlock[] {
@@ -51,6 +100,9 @@ function extractNode(node: Node): RichContentBlock[] {
     return [{ type: 'code_block', content: code.textContent ?? '', ...(language ? { language } : {}) }];
   }
   if (node.matches('code')) return [{ type: 'inline_code', content: node.textContent ?? '' }];
+  if (node.matches('strong, b')) return [{ type: 'strong', children: children(node) }];
+  if (node.matches('em, i')) return [{ type: 'emphasis', children: children(node) }];
+  if (node.matches('del, s')) return [{ type: 'strikethrough', children: children(node) }];
   if (node.matches('p')) return [{ type: 'paragraph', children: children(node) }];
   if (node.matches('blockquote')) return [{ type: 'blockquote', children: children(node) }];
   if (node.matches('ol')) {
@@ -73,7 +125,7 @@ function extractNode(node: Node): RichContentBlock[] {
 export function extractRichContent(range: Range): RichSelection {
   try {
     const expanded = expandRangeToRichAtoms(range);
-    const blocks = normalizeRichContentBlocks(extractNode(expanded.cloneContents()));
+    const blocks = normalizeRichContentBlocks(extractNode(cloneRichContents(expanded)));
     const plainText = richPlainText(blocks);
     if (plainText) return { plainText, blocks };
     const fallback = expanded.toString().trim(); return { plainText: fallback, blocks: textBlocks(fallback) };

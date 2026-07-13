@@ -223,6 +223,29 @@ export class PendingAssociationCoordinator {
     });
   }
 
+  releaseSubmission(id: string, senderTabId: number, promptHash: string): PendingAssociation | null {
+    const record = this.get(id);
+    if (!record || record.targetTabId !== senderTabId || record.pendingThread.submittedPromptHash !== promptHash ||
+      record.localThread.status !== 'waiting_for_answer') return null;
+    const timestamp = this.now().toISOString();
+    const { submittedPromptHash: _hash, submittedAt: _at, ...pendingThread } = record.pendingThread;
+    void _hash; void _at;
+    return this.update(id, {
+      pendingThread: { ...pendingThread, status: 'waiting_for_submission', updatedAt: timestamp },
+      localThread: { ...record.localThread, status: 'waiting_for_submission', updatedAt: timestamp },
+    });
+  }
+
+  markSendFailed(id: string): PendingAssociation | null {
+    const record = this.get(id);
+    if (!record || record.pendingThread.submittedPromptHash === record.pendingThread.promptHash) return record;
+    const timestamp = this.now().toISOString();
+    return this.update(id, {
+      pendingThread: { ...record.pendingThread, status: 'failed', updatedAt: timestamp },
+      localThread: { ...record.localThread, status: 'failed', updatedAt: timestamp },
+    });
+  }
+
   completeReturn(id: string, targetTabId: number): PendingAssociation | null {
     const record = this.get(id);
     if (!record || record.targetTabId !== targetTabId || record.localThread.status !== 'answer_attached') return null;

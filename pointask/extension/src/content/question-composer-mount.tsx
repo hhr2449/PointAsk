@@ -2,14 +2,16 @@ import { createRoot, type Root } from 'react-dom/client';
 import { QuestionComposer } from '../components/question-composer';
 import { composerStyles } from './shadow-styles';
 import type { SelectionData } from './selection-manager';
+import type { AnswerMode } from '../shared/local-thread';
 import { richContentStyles } from '../components/rich-content-renderer';
 import { applyPointAskTheme } from './theme';
 
 interface OpenComposerOptions {
   data: SelectionData;
-  onSubmit(question: string): void | Promise<void>;
+  onSubmit(question: string, answerMode: AnswerMode): void | Promise<void>;
   onCancel(): void;
   initialQuestion?: string;
+  answerMode?: AnswerMode;
 }
 
 export class QuestionComposerMount {
@@ -17,7 +19,7 @@ export class QuestionComposerMount {
   private root: Root | null = null;
   private submitting = false;
 
-  open({ data, onSubmit, onCancel, initialQuestion }: OpenComposerOptions): void {
+  open({ data, onSubmit, onCancel, initialQuestion, answerMode }: OpenComposerOptions): void {
     this.close();
     const host = document.createElement('pointask-question-composer');
     host.dataset.pointaskOwned = 'true';
@@ -42,17 +44,18 @@ export class QuestionComposerMount {
         richContent={data.richSelection?.blocks}
         submitting={this.submitting}
         initialQuestion={initialQuestion}
+        answerMode={answerMode}
         onCancel={() => {
           if (this.submitting) return;
           this.close();
           onCancel();
         }}
-        onSubmit={async (question) => {
+        onSubmit={async (question, selectedAnswerMode) => {
           if (this.submitting) return;
           this.submitting = true;
           render();
           try {
-            await onSubmit(question);
+            await onSubmit(question, selectedAnswerMode);
           } finally {
             this.close();
           }
@@ -74,7 +77,7 @@ export class QuestionComposerMount {
     if (!this.host) return;
     const width = Math.min(420, window.innerWidth - 16);
     const left = Math.min(Math.max(8, rect.left), window.innerWidth - width - 8);
-    const top = Math.min(Math.max(8, rect.bottom + 10), Math.max(8, window.innerHeight - 260));
+    const top = Math.min(Math.max(8, rect.bottom + 10), Math.max(8, window.innerHeight - 390));
     this.host.style.left = `${left}px`;
     this.host.style.top = `${top}px`;
   }

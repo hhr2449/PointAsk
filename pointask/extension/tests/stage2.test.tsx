@@ -83,7 +83,19 @@ describe('question composer', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(onSubmit).toHaveBeenCalledWith('为什么？');
+    expect(onSubmit).toHaveBeenCalledWith('为什么？', 'workspace');
+  });
+
+  it('submits to the answer location selected before the send click', async () => {
+    const onSubmit = vi.fn();
+    const mount = new QuestionComposerMount();
+    await act(() => mount.open({ data: selectionData(), onSubmit, onCancel: vi.fn() }));
+    const shadow = composerElements().host?.shadowRoot;
+    const currentConversation = shadow?.querySelectorAll<HTMLInputElement>('input[type="radio"]')[1];
+    await act(() => currentConversation?.click());
+    await act(() => setTextarea(composerElements().textarea as HTMLTextAreaElement, '发到当前对话'));
+    await act(async () => { composerElements().send?.click(); await Promise.resolve(); await Promise.resolve(); });
+    expect(onSubmit).toHaveBeenCalledWith('发到当前对话', 'current_conversation');
   });
 
   it('keeps the composer open on Shift+Enter', async () => {
