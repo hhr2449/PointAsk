@@ -5,12 +5,14 @@ import type { PointAskWorkspace } from '../shared/local-thread';
 import type { WorkspaceStore } from '../storage/workspace-store';
 import { isCompatibleChatGptTargetUrl } from '../bridge/runtime-messages';
 import { bannerStyles } from './shadow-styles';
+import { applyPointAskTheme } from './theme';
 
 export class WorkspaceContextBannerManager {
   private host: HTMLElement; private root: Root; private cleanup: (() => void) | null = null;
   private workspace: PointAskWorkspace | null = null; private feedback = '';
   constructor(private readonly store: WorkspaceStore, private readonly adapter: SiteAdapter, private readonly clipboard: ClipboardManager) {
     this.host = document.createElement('pointask-workspace-context-banner'); this.host.dataset.pointaskOwned = 'true';
+    applyPointAskTheme(this.host);
     const shadow = this.host.attachShadow({ mode: 'open' }); const style = document.createElement('style'); style.textContent = bannerStyles;
     const mount = document.createElement('div'); shadow.append(style, mount); document.documentElement.append(this.host); this.root = createRoot(mount);
   }

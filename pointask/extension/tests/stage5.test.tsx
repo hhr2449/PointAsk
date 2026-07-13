@@ -95,6 +95,16 @@ describe('attachment selection entry', () => {
 });
 
 describe('manual answer confirmation and storage', () => {
+  it('keeps a current-conversation pending available for attachment without rendering a top-right banner', () => {
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage: vi.fn() }), new ClipboardManager(undefined, () => false), new ChatGptAdapter());
+    const current = association().record;
+    act(() => manager.applyRecord({ ...current, pendingThread: { ...current.pendingThread, answerMode: 'current_conversation' },
+      localThread: { ...current.localThread, answerMode: 'current_conversation', status: 'waiting_for_answer' } }));
+    expect((document.querySelector('pointask-pending-thread-banner') as HTMLElement).style.display).toBe('none');
+    expect(manager.getAttachmentAssociations()).toHaveLength(1);
+    act(() => manager.stop());
+  });
+
   it('immediately hides the top-right banner after a current-conversation attachment', () => {
     const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage: vi.fn() }), new ClipboardManager(undefined, () => false), new ChatGptAdapter());
     const current = association().record;

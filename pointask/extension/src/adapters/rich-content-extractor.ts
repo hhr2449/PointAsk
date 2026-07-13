@@ -59,8 +59,14 @@ function extractNode(node: Node): RichContentBlock[] {
   }
   if (node.matches('ul')) return [{ type: 'unordered_list', items: [...node.children].filter((item) => item.matches('li')).map(listItem) }];
   if (node.matches('li')) return [listItem(node)];
+  if (node.matches('table')) return [{ type: 'table', rows: [...node.querySelectorAll(':scope > thead > tr, :scope > tbody > tr, :scope > tr')].map((row) => ({
+    type: 'table_row', cells: [...row.children].filter((cell) => cell.matches('th, td')).map((cell) => ({
+      type: 'table_cell', children: children(cell), ...(cell.matches('th') ? { header: true } : {}),
+    })),
+  })) }];
+  if (node.matches('thead, tbody, tfoot, tr, th, td')) return children(node);
   if (node.matches('br')) return [{ type: 'line_break' }];
-  if (node.matches('h1, h2, h3, h4, h5, h6')) return [{ type: 'paragraph', children: children(node) }];
+  if (node.matches('h1, h2, h3, h4, h5, h6')) return [{ type: 'heading', level: Number(node.tagName.slice(1)) as 1 | 2 | 3 | 4 | 5 | 6, children: children(node) }];
   return children(node);
 }
 

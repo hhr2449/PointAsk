@@ -1,5 +1,6 @@
 import type { SettingsStore } from '../storage/settings-store';
 import { sharedShadowStyles } from './shadow-styles';
+import { applyPointAskTheme } from './theme';
 
 export type AuthorizationChoice = 'remember' | 'once' | 'cancel';
 
@@ -17,11 +18,12 @@ export class OperationAuthorizer {
   private prompt(): Promise<boolean> {
     return new Promise((resolve) => {
       const host = document.createElement('pointask-operation-authorization'); host.dataset.pointaskOwned = 'true';
+      applyPointAskTheme(host);
       const shadow = host.attachShadow({ mode: 'open' });
       const style = document.createElement('style'); style.textContent = `${sharedShadowStyles}
-        :host{position:fixed;z-index:2147483647;inset:0;display:grid;place-items:center;padding:16px;background:#0005}
-        section{width:min(460px,100%);padding:18px;border-radius:12px;background:white;box-shadow:0 12px 36px #0004;color:#202123}
-        h2{margin:0 0 10px;font-size:18px}p{line-height:1.55}.pointask-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}`;
+        :host{position:fixed;z-index:2147483647;top:16px;right:16px;width:min(390px,calc(100vw - 32px))}
+        section{padding:14px;border:1px solid var(--pa-border);border-radius:var(--pa-radius);background:var(--pa-bg);box-shadow:var(--pa-shadow);color:var(--pa-text)}
+        h2{margin:0 0 7px;font-size:15px}p{margin:0;color:var(--pa-muted);font-size:13px;line-height:1.45}.pointask-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}`;
       const section = document.createElement('section'); section.setAttribute('role', 'dialog'); section.setAttribute('aria-modal', 'true');
       const title = document.createElement('h2'); title.textContent = '允许本次 PointAsk 操作？';
       const description = document.createElement('p'); description.textContent = '允许 PointAsk 在你主动点击操作按钮后，自动完成本次填入、发送或附加。PointAsk 不会在后台自行操作。';

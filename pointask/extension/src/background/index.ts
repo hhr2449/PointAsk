@@ -117,6 +117,10 @@ export async function handleRuntimeMessage(
   try {
     switch (message.type) {
       case 'pointask:create-pending-thread': {
+        const stored = await deps.threadStore?.get(message.pendingThread.id);
+        if (stored && (stored.createdAt !== message.pendingThread.createdAt || stored.sourceMessageFingerprint !== message.pendingThread.sourceMessageFingerprint)) {
+          throw new Error('线程标识冲突，请刷新页面后重试');
+        }
         const record = deps.coordinator.create(message.pendingThread, senderTabId, message.localThread);
         await persist(record, deps);
         return { ok: true, data: record };

@@ -18,6 +18,9 @@ import { richPlainText, textBlocks } from '../shared/rich-content';
 import { richContentStyles } from '../components/rich-content-renderer';
 import { ViewAnchorController } from './view-anchor-controller';
 import type { SiteAdapter } from '../adapters/site-adapter';
+import { applyPointAskTheme } from './theme';
+import type { OperationAuthorizer } from './operation-authorizer';
+import { showOperationToast } from './operation-feedback';
 
 interface MountedThread {
   host: HTMLElement;
@@ -63,6 +66,7 @@ export class InlineThreadManager {
   private expandNewThreads = false;
   private currentConversationScrollBehavior: 'stay_at_source' | 'follow_response' = 'stay_at_source';
   private readonly viewAnchors = new Map<string, ViewAnchorController>();
+  private readonly sendingIds = new Set<string>();
   private workspaceContextHandler: ((workspace: PointAskWorkspace, threadId: string) => void) | null = null;
 
   constructor(
@@ -76,6 +80,7 @@ export class InlineThreadManager {
     private readonly metrics?: MetricsStore,
     private readonly workspaceStore?: WorkspaceStore,
     private readonly siteAdapter?: SiteAdapter,
+    private readonly operationAuthorizer?: OperationAuthorizer,
   ) {}
 
   async create(
@@ -182,7 +187,7 @@ export class InlineThreadManager {
       if (!this.webBridge) return false;
       try {
         await this.webBridge.savePendingThread(pending, item.thread);
-        const record = await this.webBridge.associateCurrentPage(id, item.thread.sourcePageUrl);
+        const record = await this.webBridge.associateCurrentPage(id, item.thread.sourcePageUrl, true);
         const waiting = this.pendingThreads.markWaitingForSubmission(id);
         item.thread = { ...record.localThread, status: 'waiting_for_submission' };
         if (waiting) await this.webBridge.updateLocalThread(waiting, item.thread);
@@ -216,6 +221,7 @@ export class InlineThreadManager {
     const host = document.createElement('pointask-inline-thread');
     host.dataset.pointaskOwned = 'true';
     host.dataset.pointaskThreadId = thread.id;
+    applyPointAskTheme(host, anchorElement);
     const shadow = host.attachShadow({ mode: 'open' });
     const style = document.createElement('style');
     style.textContent = `${threadStyles}\n${richContentStyles}`;
@@ -287,6 +293,30 @@ export class InlineThreadManager {
       this.render(id);
       return false;
     }
+  }
+
+  async sendCurrentConversation(id: string): Promise<boolean> {
+    const item = this.mounted.get(id); const pending = this.pendingThreads.get(id);
+    if (!item || !pending || item.thread.answerMode !== 'current_conversation' || !this.webBridge || !this.siteAdapter || this.sendingIds.has(id)) return false;
+    if (pending.submittedPromptHash === pending.promptHash) { item.error = '该问题已经发送'; this.render(id); return false; }
+    if (this.operationAuthorizer && !(await this.operationAuthorizer.authorize())) return false;
+    this.sendingIds.add(id); item.error = undefined; this.render(id);
+    try {
+      if (this.siteAdapter.getConversationKey() !== item.thread.sourceConversationKey) throw new Error('当前页面与线程不匹配');
+      if (!this.siteAdapter.fillComposer(pending.generatedPrompt)) throw new Error('无法填入输入框');
+      let ready = this.siteAdapter.canSubmitComposer();
+      for (let attempt = 0; !ready && attempt < 10; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 50)); ready = this.siteAdapter.canSubmitComposer();
+      }
+      if (!ready) throw new Error('发送按钮当前不可用');
+      const record = await this.webBridge.reservePromptSubmission(id, pending.promptHash ?? '', window.location.href);
+      if (!this.siteAdapter.submitComposer()) throw new Error('发送未完成；为避免重复提交，本轮不会自动重试');
+      this.pendingThreads.restore(record.pendingThread); item.thread = record.localThread;
+      void Promise.all([this.threadStore?.upsert(item.thread), this.pendingStore?.upsert(record.pendingThread)]);
+      showOperationToast('已发送'); this.render(id); return true;
+    } catch (error) {
+      item.error = error instanceof Error ? error.message : '操作失败，请重试'; this.render(id); return false;
+    } finally { this.sendingIds.delete(id); }
   }
 
   async prepareManualBranch(id: string): Promise<boolean> {
@@ -575,7 +605,7 @@ export class InlineThreadManager {
         onToggle={() => this.toggle(id)}
         onDelete={() => this.delete(id)}
         onCopy={() => void this.copy(id)}
-        onOpenTarget={() => void this.copyAndOpenTarget(id)}
+        onOpenTarget={() => void (item.thread.answerMode === 'current_conversation' ? this.sendCurrentConversation(id) : this.copyAndOpenTarget(id))}
         onManualBranch={() => void this.prepareManualBranch(id)}
         onCancel={() => this.cancel(id)}
         onOpenAnswer={() => {

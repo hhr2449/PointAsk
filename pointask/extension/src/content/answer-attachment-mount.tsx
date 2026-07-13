@@ -6,6 +6,7 @@ import { attachmentConfirmationStyles } from './shadow-styles';
 import type { SelectionData } from './selection-manager';
 import { richContentStyles } from '../components/rich-content-renderer';
 import type { OperationAuthorizer } from './operation-authorizer';
+import { applyPointAskTheme } from './theme';
 
 export class AnswerAttachmentMount {
   private host: HTMLElement | null = null;
@@ -34,6 +35,7 @@ export class AnswerAttachmentMount {
     this.error = undefined;
     const host = document.createElement('pointask-answer-attachment-confirmation');
     host.dataset.pointaskOwned = 'true';
+    applyPointAskTheme(host);
     const shadow = host.attachShadow({ mode: 'open' });
     const style = document.createElement('style');
     style.textContent = `${attachmentConfirmationStyles}\n${richContentStyles}`;

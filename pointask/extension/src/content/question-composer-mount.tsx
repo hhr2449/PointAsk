@@ -3,6 +3,7 @@ import { QuestionComposer } from '../components/question-composer';
 import { composerStyles } from './shadow-styles';
 import type { SelectionData } from './selection-manager';
 import { richContentStyles } from '../components/rich-content-renderer';
+import { applyPointAskTheme } from './theme';
 
 interface OpenComposerOptions {
   data: SelectionData;
@@ -20,6 +21,7 @@ export class QuestionComposerMount {
     this.close();
     const host = document.createElement('pointask-question-composer');
     host.dataset.pointaskOwned = 'true';
+    applyPointAskTheme(host, data.anchorElement);
     const shadow = host.attachShadow({ mode: 'open' });
     const style = document.createElement('style');
     style.textContent = `${composerStyles}\n${richContentStyles}`;

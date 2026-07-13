@@ -33,9 +33,20 @@ function normalizeBlock(block: RichContentBlock): RichContentBlock | null {
   }
   if (block.type === 'inline_math' || block.type === 'block_math') return block.latex ? block : null;
   if (block.type === 'line_break') return block;
-  if (block.type === 'paragraph' || block.type === 'blockquote' || block.type === 'list_item') {
+  if (block.type === 'paragraph' || block.type === 'blockquote' || block.type === 'list_item' || block.type === 'heading' || block.type === 'table_cell') {
     const children = normalizeSequence(block.children, true);
-    return children.length ? { type: block.type, children } : null;
+    if (!children.length) return null;
+    if (block.type === 'heading') return { type: 'heading', level: block.level, children };
+    if (block.type === 'table_cell') return { type: 'table_cell', children, ...(block.header ? { header: true } : {}) };
+    return { type: block.type, children };
+  }
+  if (block.type === 'table') {
+    const rows = normalizeSequence(block.rows).filter((item) => item.type === 'table_row');
+    return rows.length ? { type: 'table', rows } : null;
+  }
+  if (block.type === 'table_row') {
+    const cells = normalizeSequence(block.cells).filter((item) => item.type === 'table_cell');
+    return cells.length ? { type: 'table_row', cells } : null;
   }
   const items = normalizeSequence(block.items).filter((item) => item.type === 'list_item');
   if (!items.length) return null;
@@ -67,6 +78,8 @@ export function richPlainText(blocks: RichContentBlock[]): string {
     if (block.type === 'inline_math' || block.type === 'block_math') return block.latex;
     if (block.type === 'text' || block.type === 'inline_code' || block.type === 'code' || block.type === 'code_block') return block.content;
     if (block.type === 'ordered_list' || block.type === 'unordered_list') return block.items.map(render).join('\n');
+    if (block.type === 'table') return block.rows.map(render).join('\n');
+    if (block.type === 'table_row') return block.cells.map(render).join('\t');
     return block.children.map(render).join('');
   };
   return normalizeRichContentBlocks(blocks).map(render).join('\n').trim();
@@ -88,9 +101,19 @@ export function normalizeRichBlocks(value: unknown): RichContentBlock[] | null {
       return { type, content: block.content, ...(block.language ? { language: block.language as string } : {}) };
     }
     if ((type === 'inline_math' || type === 'block_math') && typeof block.latex === 'string') return { type, latex: block.latex };
-    if ((type === 'paragraph' || type === 'blockquote' || type === 'list_item') && Array.isArray(block.children)) {
+    if ((type === 'paragraph' || type === 'blockquote' || type === 'list_item' || type === 'heading' || type === 'table_cell') && Array.isArray(block.children)) {
       const children = block.children.map(parse); if (children.some((item) => !item)) return null;
+      if (type === 'heading') return Number.isInteger(block.level) && Number(block.level) >= 1 && Number(block.level) <= 6
+        ? { type, level: Number(block.level) as 1 | 2 | 3 | 4 | 5 | 6, children: children as RichContentBlock[] } : null;
+      if (type === 'table_cell') return block.header === undefined || typeof block.header === 'boolean'
+        ? { type, children: children as RichContentBlock[], ...(block.header ? { header: true } : {}) } : null;
       return { type, children: children as RichContentBlock[] };
+    }
+    if (type === 'table' && Array.isArray(block.rows)) {
+      const rows = block.rows.map(parse); return rows.every((item) => item?.type === 'table_row') ? { type, rows: rows as RichContentBlock[] } : null;
+    }
+    if (type === 'table_row' && Array.isArray(block.cells)) {
+      const cells = block.cells.map(parse); return cells.every((item) => item?.type === 'table_cell') ? { type, cells: cells as RichContentBlock[] } : null;
     }
     if ((type === 'ordered_list' || type === 'unordered_list') && Array.isArray(block.items)) {
       const items = block.items.map(parse); if (items.some((item) => !item)) return null;

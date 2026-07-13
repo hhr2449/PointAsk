@@ -1,5 +1,7 @@
 import type { PendingAssociation } from '../bridge/runtime-messages';
 import type { SelectionData } from './selection-manager';
+import { applyPointAskTheme } from './theme';
+import { sharedShadowStyles } from './shadow-styles';
 
 const TOOLBAR_GAP = 10;
 const VIEWPORT_MARGIN = 8;
@@ -18,15 +20,15 @@ export class SelectionToolbar {
   constructor(private readonly options: SelectionToolbarOptions) {
     this.host = document.createElement('pointask-selection-toolbar');
     this.host.dataset.pointaskOwned = 'true';
+    applyPointAskTheme(this.host);
     this.host.style.display = 'none';
     const shadow = this.host.attachShadow({ mode: 'open' });
-    shadow.innerHTML = `
+    shadow.innerHTML = `<style>${sharedShadowStyles}</style>
       <style>
-        :host { all: initial; position: fixed; z-index: 2147483647; font-family: system-ui, sans-serif; }
-        .pointask-actions { display: flex; flex-wrap: wrap; gap: 4px; box-sizing: border-box; max-width: min(520px, calc(100vw - 16px)); padding: 3px; background: #fff; border: 1px solid #d9d9e3; border-radius: 10px; box-shadow: 0 6px 22px rgb(0 0 0 / 18%); }
-        button { border: 0; border-radius: 8px; padding: 8px 12px; color: #fff; background: #10a37f; font: 600 13px/1.2 system-ui, sans-serif; cursor: pointer; white-space: nowrap; }
-        button.pointask-attach { background: #0b57d0; }
-        button:focus-visible { outline: 2px solid #111; outline-offset: 2px; }
+        :host { position: fixed; z-index: 2147483647; }
+        .pointask-actions { display:flex;flex-wrap:wrap;gap:3px;box-sizing:border-box;max-width:min(520px,calc(100vw - 16px));padding:3px;background:var(--pa-bg);border:1px solid var(--pa-border);border-radius:var(--pa-radius);box-shadow:var(--pa-shadow); }
+        button { border:0;border-radius:7px;padding:7px 10px;color:var(--pa-text);background:transparent;font:600 13px/1.2 var(--pointask-font);cursor:pointer;white-space:nowrap; }
+        button:hover { background:var(--pa-hover); } button.pointask-attach { color:var(--pa-text); }
       </style>
       <div class="pointask-actions"></div>
     `;

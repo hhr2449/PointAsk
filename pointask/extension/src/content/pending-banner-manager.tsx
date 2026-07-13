@@ -11,7 +11,8 @@ import { richPlainText } from '../shared/rich-content';
 import { richContentStyles } from '../components/rich-content-renderer';
 import { ViewAnchorController } from './view-anchor-controller';
 import type { OperationAuthorizer } from './operation-authorizer';
-import { showAttachmentUndo } from './operation-feedback';
+import { showAttachmentUndo, showOperationToast } from './operation-feedback';
+import { applyPointAskTheme } from './theme';
 
 export class PendingBannerManager {
   private readonly host: HTMLElement;
@@ -37,6 +38,7 @@ export class PendingBannerManager {
   ) {
     this.host = document.createElement('pointask-pending-thread-banner');
     this.host.dataset.pointaskOwned = 'true';
+    applyPointAskTheme(this.host);
     const shadow = this.host.attachShadow({ mode: 'open' });
     const style = document.createElement('style');
     style.textContent = `${bannerStyles}\n${richContentStyles}`;
@@ -114,7 +116,8 @@ export class PendingBannerManager {
   };
 
   private render(): void {
-    const visible = [...this.records.values()].filter((record) => !this.closedIds.has(record.pendingThread.id));
+    const visible = [...this.records.values()].filter((record) => !this.closedIds.has(record.pendingThread.id) &&
+      record.localThread.answerMode !== 'current_conversation');
     this.host.style.display = visible.length ? 'block' : 'none';
     this.root.render(
       <PendingThreadBanner
@@ -165,6 +168,7 @@ export class PendingBannerManager {
       const reserved = await this.bridge.reservePromptSubmission(id, record.pendingThread.promptHash ?? '', window.location.href);
       if (!this.adapter.submitComposer()) throw new Error('发送未完成；为避免重复提交，本轮不会自动重试');
       this.records.set(id, reserved); this.errors.set(id, '已发送');
+      showOperationToast('已发送');
     } catch (error) {
       this.errors.set(id, error instanceof Error ? error.message : '操作失败，请重试');
     } finally { this.sendingIds.delete(id); this.render(); }
@@ -247,6 +251,7 @@ export class PendingBannerManager {
       if (record.localThread.status !== 'answer_attached') return;
     }
     await this.bridge.returnToSource(id);
+    showOperationToast('已返回原文');
   }
 
   private async associate(id: string, confirmed: boolean): Promise<void> {

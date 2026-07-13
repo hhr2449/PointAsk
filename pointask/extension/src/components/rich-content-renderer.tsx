@@ -18,12 +18,13 @@ export const richContentStyles = `${katexCss.replaceAll('url(/assets/', `url(${k
 .pointask-rich-content :where(ul, ol) { padding-left: 1.5em; }
 .pointask-rich-content li + li { margin-top: .2em; }
 .pointask-rich-content li > p { margin: .2em 0; }
-.pointask-rich-content blockquote { padding: .2em .75em; border-left: 3px solid #9aa0a6; color: #555; }
-.pointask-rich-content a { color: #0969da; text-decoration: underline; }
-.pointask-rich-content table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
-.pointask-rich-content :where(th, td) { padding: 6px 9px; border: 1px solid #d0d7de; text-align: left; }
-.pointask-rich-content th { background: #f3f4f6; }
-.pointask-rich-content code { border-radius: 4px; padding: .12em .3em; background: #eff1f3; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .92em; }
+.pointask-rich-content blockquote { padding: .15em .7em; border-left: 2px solid var(--pa-border, #9aa0a6); color: var(--pa-muted, #666); }
+.pointask-rich-content a { color: var(--pa-accent, #0969da); text-decoration: underline; }
+.pointask-rich-content .pointask-table-scroll { max-width: 100%; overflow-x: auto; margin: .65em 0; }
+.pointask-rich-content table { width: max-content; min-width: min(100%, 360px); border-collapse: collapse; }
+.pointask-rich-content :where(th, td) { padding: 5px 8px; border: 1px solid var(--pa-border, #d0d7de); text-align: left; }
+.pointask-rich-content th { background: var(--pa-bg-subtle, #f3f4f6); }
+.pointask-rich-content code { border-radius: 4px; padding: .1em .28em; background: var(--pa-bg-subtle, #eff1f3); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .92em; }
 .pointask-rich-content .pointask-inline-math { display: inline-block; max-width: 100%; vertical-align: middle; }
 .pointask-rich-content .pointask-block-math { display: block; max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
 .pointask-rich-content .katex, .pointask-rich-content .katex * { white-space: nowrap; }
@@ -87,9 +88,22 @@ function RenderBlocks({ blocks, inline = false }: { blocks: RichContentBlock[]; 
     if (block.type === 'code' || block.type === 'code_block') return <pre key={index}><code data-language={block.language}>{block.content}</code></pre>;
     if (block.type === 'inline_math' || block.type === 'block_math') return <MathBlock key={index} latex={block.latex} displayMode={block.type === 'block_math'} />;
     if (block.type === 'paragraph') return <p key={index}><RenderBlocks blocks={block.children} inline /></p>;
+    if (block.type === 'heading') {
+      if (block.level === 1) return <h1 key={index}><RenderBlocks blocks={block.children} inline /></h1>;
+      if (block.level === 2) return <h2 key={index}><RenderBlocks blocks={block.children} inline /></h2>;
+      if (block.level === 3) return <h3 key={index}><RenderBlocks blocks={block.children} inline /></h3>;
+      if (block.level === 4) return <h4 key={index}><RenderBlocks blocks={block.children} inline /></h4>;
+      if (block.level === 5) return <h5 key={index}><RenderBlocks blocks={block.children} inline /></h5>;
+      return <h6 key={index}><RenderBlocks blocks={block.children} inline /></h6>;
+    }
     if (block.type === 'blockquote') return <blockquote key={index}><RenderBlocks blocks={block.children} /></blockquote>;
     if (block.type === 'list_item') return <li key={index}><RenderBlocks blocks={block.children} /></li>;
     if (block.type === 'ordered_list') return <ol key={index} start={block.start}><RenderBlocks blocks={block.items} /></ol>;
+    if (block.type === 'table') return <div className="pointask-table-scroll" key={index}><table><tbody><RenderBlocks blocks={block.rows} /></tbody></table></div>;
+    if (block.type === 'table_row') return <tr key={index}><RenderBlocks blocks={block.cells} /></tr>;
+    if (block.type === 'table_cell') return block.header
+      ? <th key={index}><RenderBlocks blocks={block.children} inline /></th>
+      : <td key={index}><RenderBlocks blocks={block.children} inline /></td>;
     return <ul key={index}><RenderBlocks blocks={block.items} /></ul>;
   });
 }

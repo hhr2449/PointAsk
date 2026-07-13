@@ -41,7 +41,7 @@ if (adapter.isSupportedPage()) {
   const operationAuthorizer = new OperationAuthorizer(settingsStore);
   const pendingThreads = new PendingThreadManager();
   const threads = new InlineThreadManager(
-    pendingThreads, clipboard, webBridge, undefined, undefined, threadStore, pendingStore, metrics, workspaceStore, adapter,
+    pendingThreads, clipboard, webBridge, undefined, undefined, threadStore, pendingStore, metrics, workspaceStore, adapter, operationAuthorizer,
   );
   const answerModeMount = new AnswerModeMount();
   const banner = new PendingBannerManager(webBridge, clipboard, adapter, operationAuthorizer);

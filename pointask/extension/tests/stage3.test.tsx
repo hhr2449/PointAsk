@@ -122,6 +122,14 @@ describe('clipboard manager', () => {
 });
 
 describe('pending thread manager', () => {
+  it('generates unique IDs across independent page manager instances', () => {
+    const input = { anchor, question: '问题', generatedPrompt: '提示词', promptMode: 'compact' as const };
+    const first = new PendingThreadManager().create(input);
+    const second = new PendingThreadManager().create(input);
+    expect(first?.id).not.toBe(second?.id);
+    expect(first?.id).toMatch(/^pointask-pending-/);
+  });
+
   it('creates and deletes a submitted pending thread', () => {
     const now = new Date('2026-07-12T00:00:00.000Z');
     const manager = new PendingThreadManager(() => now, () => 'pointask-pending-test');
@@ -161,7 +169,7 @@ describe('pending thread card flow', () => {
     if (!threadId) throw new Error('Expected a pending thread ID');
     await act(() => manager.toggle(threadId));
     expect(manager.getThread(threadId)?.status).toBe('prompt_ready');
-    expect(manager.getHost(threadId)?.shadowRoot?.textContent).toContain('等待你点击发送');
+    expect(manager.getHost(threadId)?.shadowRoot?.textContent).toContain('等待发送');
 
     await act(async () => { await manager.copy(threadId); });
     expect(writeText).toHaveBeenCalledOnce();
@@ -170,7 +178,7 @@ describe('pending thread card flow', () => {
     await act(() => manager.next(threadId));
     expect(manager.getThread(threadId)?.status).toBe('waiting_for_answer');
     expect(pending.get(threadId)?.status).toBe('waiting_for_answer');
-    expect(manager.getHost(threadId)?.shadowRoot?.textContent).toContain('正在等待 ChatGPT 回答');
+    expect(manager.getHost(threadId)?.shadowRoot?.textContent).toContain('正在回答');
   });
 
   it('deletes pending data, unmounts its React root, and removes its host', () => {

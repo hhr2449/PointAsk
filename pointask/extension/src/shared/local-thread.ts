@@ -9,6 +9,10 @@ export type RichContentBlock =
   | { type: 'ordered_list'; items: RichContentBlock[]; start?: number }
   | { type: 'unordered_list'; items: RichContentBlock[] }
   | { type: 'list_item'; children: RichContentBlock[] }
+  | { type: 'heading'; level: 1 | 2 | 3 | 4 | 5 | 6; children: RichContentBlock[] }
+  | { type: 'table'; rows: RichContentBlock[] }
+  | { type: 'table_row'; cells: RichContentBlock[] }
+  | { type: 'table_cell'; children: RichContentBlock[]; header?: boolean }
   | { type: 'inline_code'; content: string }
   | { type: 'code_block'; content: string; language?: string }
   /** Legacy storage shape; normalized to code_block before rendering. */

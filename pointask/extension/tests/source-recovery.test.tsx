@@ -42,6 +42,8 @@ describe('source card live recovery', () => {
     const shadow = manager.getHost(restored.id)?.shadowRoot;
     expect(shadow?.querySelector('.pointask-toggle')?.getAttribute('aria-expanded')).toBe('false');
     expect(shadow?.textContent).toContain('继续追问'); expect(shadow?.textContent).toContain('2 轮');
+    expect(shadow?.querySelectorAll('.pointask-primary-action')).toHaveLength(1);
+    expect(shadow?.querySelector('.pointask-summary')?.textContent).toContain('为什么？');
   });
 
   it('replaces an already-mounted waiting card with persisted attached data', async () => {
@@ -86,4 +88,15 @@ describe('source card live recovery', () => {
     expect(manager.getHost(waiting.id)?.isConnected).toBe(true);
     expect(manager.getHost(waiting.id)?.previousElementSibling).toBe(replacementAnchor);
   });
+
+  it('shows current-page attach choices in the card header without requiring expansion', async () => {
+    document.body.innerHTML = '<p id="anchor">来源段落</p>';
+    const manager = new InlineThreadManager(new PendingThreadManager(), new ClipboardManager(undefined, () => false));
+    await act(() => manager.mount({ ...waiting, answerMode: 'current_conversation', status: 'answer_ready', expanded: false }, document.getElementById('anchor') as HTMLElement));
+    const header = manager.getHost(waiting.id)?.shadowRoot?.querySelector('.pointask-header-actions');
+    expect(header?.textContent).toContain('一键附加');
+    expect(header?.textContent).toContain('框选附加');
+    expect(manager.getHost(waiting.id)?.shadowRoot?.querySelector('.pointask-thread-body')).toBeNull();
+  });
+
 });

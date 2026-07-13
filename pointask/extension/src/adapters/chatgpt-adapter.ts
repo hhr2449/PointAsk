@@ -8,6 +8,7 @@ import type { AnswerSourceLocator, RichSelection, WorkspaceContextMessage } from
 const ASSISTANT_ROLE_SELECTOR = '[data-message-author-role="assistant"]';
 const MESSAGE_SELECTOR = '[data-testid^="conversation-turn-"]';
 const CONTENT_SELECTOR = '.markdown, [data-message-content]';
+const USER_CONTENT_SELECTOR = '[data-message-content], [data-testid="user-message"], .markdown, .whitespace-pre-wrap';
 const BLOCK_SELECTOR = 'p, li, pre, blockquote, h1, h2, h3, h4, h5, h6';
 const STANDALONE_MATH_SELECTOR = '.katex-display, math[display="block"]';
 const OBSERVER_DEBOUNCE_MS = 100;
@@ -139,11 +140,21 @@ export class ChatGptAdapter implements SiteAdapter {
       if (!this.isAssistantMessage(message)) continue;
       const messageFingerprint = this.getMessageFingerprint(message);
       if (!messageFingerprint || baseline.has(messageFingerprint)) continue;
-      const previous = turns[index - 1]!;
-      const userRole = previous.querySelector('[data-message-author-role="user"]');
-      const userContent = userRole?.querySelector(CONTENT_SELECTOR) ?? userRole;
-      const userText = normalizeText((userContent as HTMLElement | null)?.innerText || userContent?.textContent || '');
-      if (!userText || stableTextHash(userText) !== promptHash) continue;
+      let previousMessage: HTMLElement | null = null;
+      for (let previousIndex = index - 1; previousIndex >= 0; previousIndex--) {
+        const role = turns[previousIndex]!.querySelector<HTMLElement>('[data-message-author-role]')?.dataset.messageAuthorRole;
+        if (role === 'user' || role === 'assistant') { previousMessage = turns[previousIndex]!; break; }
+      }
+      const userRole = previousMessage?.querySelector<HTMLElement>('[data-message-author-role="user"]');
+      if (!userRole) continue;
+      const textCandidates = new Set<string>();
+      for (const content of userRole.querySelectorAll<HTMLElement>(USER_CONTENT_SELECTOR)) {
+        const text = normalizeText(content.innerText || content.textContent || ''); if (text) textCandidates.add(text);
+      }
+      const cleaned = userRole.cloneNode(true) as HTMLElement;
+      cleaned.querySelectorAll('button, [role="button"], svg').forEach((control) => control.remove());
+      const cleanedText = normalizeText(cleaned.innerText || cleaned.textContent || ''); if (cleanedText) textCandidates.add(cleanedText);
+      if (![...textCandidates].some((text) => stableTextHash(text) === promptHash)) continue;
       candidates.push({
         element: message,
         fingerprint: messageFingerprint,

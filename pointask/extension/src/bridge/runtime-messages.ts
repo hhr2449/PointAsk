@@ -185,9 +185,16 @@ function isRichContent(value: unknown): value is RichContentBlock[] {
     if ((raw.type === 'inline_math' || raw.type === 'block_math') && typeof raw.latex === 'string') {
       contentLength += raw.latex.length; return contentLength <= 8_000 && hasOnlyKeys(raw, ['type', 'latex']);
     }
-    if (['paragraph', 'blockquote', 'list_item'].includes(String(raw.type)) && Array.isArray(raw.children)) {
-      return hasOnlyKeys(raw, ['type', 'children']) && raw.children.length <= 500 && raw.children.every((child) => validate(child, depth + 1));
+    if (['paragraph', 'blockquote', 'list_item', 'heading', 'table_cell'].includes(String(raw.type)) && Array.isArray(raw.children)) {
+      const keys = raw.type === 'heading' ? ['type', 'level', 'children'] : raw.type === 'table_cell' ? ['type', 'children', 'header'] : ['type', 'children'];
+      return hasOnlyKeys(raw, keys) && (raw.type !== 'heading' || typeof raw.level === 'number' && raw.level >= 1 && raw.level <= 6) &&
+        (raw.type !== 'table_cell' || raw.header === undefined || typeof raw.header === 'boolean') &&
+        raw.children.length <= 500 && raw.children.every((child) => validate(child, depth + 1));
     }
+    if (raw.type === 'table' && Array.isArray(raw.rows)) return hasOnlyKeys(raw, ['type', 'rows']) && raw.rows.length <= 500 &&
+      raw.rows.every((row) => isRecord(row) && row.type === 'table_row' && validate(row, depth + 1));
+    if (raw.type === 'table_row' && Array.isArray(raw.cells)) return hasOnlyKeys(raw, ['type', 'cells']) && raw.cells.length <= 100 &&
+      raw.cells.every((cell) => isRecord(cell) && cell.type === 'table_cell' && validate(cell, depth + 1));
     if ((raw.type === 'ordered_list' || raw.type === 'unordered_list') && Array.isArray(raw.items)) {
       return hasOnlyKeys(raw, raw.type === 'ordered_list' ? ['type', 'items', 'start'] : ['type', 'items']) &&
         (raw.start === undefined || typeof raw.start === 'number') && raw.items.length <= 500 &&

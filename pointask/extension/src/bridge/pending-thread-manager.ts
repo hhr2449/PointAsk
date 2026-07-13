@@ -47,12 +47,17 @@ export interface CreatePendingThreadInput {
 
 let nextPendingId = 1;
 
+function uniquePendingId(): string {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  return uuid ? `pointask-pending-${uuid}` : `pointask-pending-${Date.now().toString(36)}-${nextPendingId++}`;
+}
+
 export class PendingThreadManager {
   private readonly threads = new Map<string, PendingThread>();
 
   constructor(
     private readonly now: () => Date = () => new Date(),
-    private readonly createId: () => string = () => `pointask-pending-${nextPendingId++}`,
+    private readonly createId: () => string = uniquePendingId,
   ) {}
 
   create(input: CreatePendingThreadInput): PendingThread | null {

@@ -1,6 +1,7 @@
 import type { PendingThread } from '../bridge/pending-thread-manager';
 import type { AnswerSourceLocator, LocalThread, PointAskWorkspace } from '../shared/local-thread';
 import { RichContentRenderer } from './rich-content-renderer';
+import { richPlainText } from '../shared/rich-content';
 
 interface ThreadCardProps {
   thread: LocalThread; workspace?: PointAskWorkspace; pending: PendingThread | null; copied: boolean; error?: string; manualBranch: boolean; expanded: boolean;
@@ -17,24 +18,31 @@ export function ThreadCard(props: ThreadCardProps) {
   const { thread, error, manualBranch, expanded } = props;
   const answers = thread.messages.filter((message) => message.role === 'assistant');
   const latestAnswer = answers.at(-1);
+  const questionTitle = richPlainText(thread.messages.find((message) => message.role === 'user')?.content ?? []);
   const rounds = thread.messages.filter((message) => message.role === 'user').length;
   const waitingSubmission = thread.status === 'draft' || thread.status === 'prompt_ready' || thread.status === 'waiting_for_submission';
   const waitingAnswer = thread.status === 'waiting_for_answer' || thread.status === 'generating';
   const answerReady = thread.status === 'answer_ready';
   const attached = thread.status === 'answer_attached';
   const modeLabel = thread.answerMode === 'workspace' ? '共享追问空间' : thread.answerMode === 'current_conversation' ? '当前对话' : '独立分支';
+  const statusLabel = waitingSubmission ? '等待发送' : waitingAnswer ? '正在回答' : answerReady ? '回答已生成' : attached ? '已附加' : thread.status === 'failed' ? '操作失败' : '关联失效';
+  const primaryLabel = attached ? '继续追问' : answerReady && thread.answerMode === 'current_conversation' ? '一键附加'
+    : waitingSubmission ? '发送追问' : '查看回答';
+  const primaryAction = attached ? props.onContinue : answerReady && thread.answerMode === 'current_conversation'
+    ? props.onAttachCandidate : waitingSubmission ? props.onOpenTarget : thread.answerMode === 'current_conversation' ? props.onGoCandidate : props.onOpenAnswer;
 
   return <pointask-thread-card>
     <header className="pointask-thread-header">
       <button type="button" className="pointask-toggle" aria-expanded={expanded} onClick={props.onToggle}>
-        <span className="pointask-summary">“{summary(thread.anchor.selectedText)}” <b>{thread.displayId}</b></span>
+        <span className={`pointask-status-dot pointask-status-${thread.status}`} aria-hidden="true" />
+        <span className="pointask-summary"><b>{thread.displayId}</b><span>{summary(questionTitle || thread.anchor.selectedText)}</span></span>
         <span className="pointask-count">{rounds} 轮</span>
       </button>
       <div className="pointask-header-actions" aria-label={`${thread.displayId} 快捷操作`}>
-        {attached && <button type="button" className="pointask-quick" onClick={props.onContinue}>继续追问</button>}
-        {!attached && <button type="button" className="pointask-quick" onClick={waitingSubmission ? props.onOpenTarget : props.onGoCandidate}>{waitingSubmission ? '去回答' : '查看回答'}</button>}
-        {latestAnswer?.answerSource && <button type="button" className="pointask-quick" aria-label={`查看 ${thread.displayId} 原回答`} onClick={() => props.onViewAnswer(latestAnswer.answerSource!)}>查看原回答</button>}
-        <details className="pointask-more"><summary aria-label={`${thread.displayId} 更多操作`}>更多</summary><div className="pointask-more-menu">
+        <button type="button" className="pointask-quick pointask-primary-action" onClick={primaryAction}>{primaryLabel}</button>
+        {answerReady && thread.answerMode === 'current_conversation' && <button type="button" className="pointask-quick pointask-secondary-action" onClick={props.onGoCandidate}>框选附加</button>}
+        <details className="pointask-more"><summary aria-label={`${thread.displayId} 更多操作`}>···</summary><div className="pointask-more-menu">
+          {latestAnswer?.answerSource && <button type="button" onClick={() => props.onViewAnswer(latestAnswer.answerSource!)}>查看原回答</button>}
           {attached && <button type="button" onClick={props.onUndoAttachment}>撤销附加</button>}
           {attached && <button type="button" onClick={props.onOpenAnswer}>替换回答</button>}
           {answerReady && thread.answerMode === 'current_conversation' && <button type="button" onClick={props.onGoCandidate}>框选部分附加</button>}
@@ -48,7 +56,7 @@ export function ThreadCard(props: ThreadCardProps) {
     </header>
     {expanded && <div className="pointask-thread-body">
       <div className="pointask-status" role="status"><strong>{thread.displayId} · {modeLabel}</strong><br />
-        {waitingSubmission ? '等待你点击发送' : waitingAnswer ? '正在等待 ChatGPT 回答' : answerReady ? '回答已生成，等待你附加' : attached ? '回答已附加' : thread.status === 'failed' ? '当前操作已取消' : '无法定位原文'}</div>
+        <span className="pointask-status-line"><span className={`pointask-status-dot pointask-status-${thread.status}`} aria-hidden="true" />{statusLabel}</span></div>
       {thread.answerMode === 'current_conversation' && <p className="pointask-warning">当前对话回答：此局部问答同时存在于 ChatGPT 主聊天记录中。</p>}
       {thread.answerMode === 'workspace' && props.workspace && <div className="pointask-workspace-context" role="status">
         <span>{props.workspace.contextState.status === 'fresh' ? '上下文已更新' : props.workspace.contextState.status === 'outdated'
@@ -65,13 +73,6 @@ export function ThreadCard(props: ThreadCardProps) {
       {error && <p className="pointask-error" role="alert">{error}</p>}
       {error && <div className="pointask-error-actions"><button type="button" onClick={props.onManualBranch}>重新关联当前页面</button><button type="button" onClick={props.onOpenAnswer}>打开已关联页面</button><button type="button" onClick={props.onCancel}>取消当前操作</button></div>}
       {manualBranch && <p>请在目标 ChatGPT 页面重新关联当前线程。</p>}
-      <div className="pointask-card-actions pointask-sticky-actions">
-        {waitingSubmission && <><button type="button" className="pointask-primary" onClick={props.onOpenTarget}>去回答</button><button type="button" className="pointask-secondary" onClick={props.onCancel}>取消</button></>}
-        {waitingAnswer && <><button type="button" className="pointask-primary" onClick={props.onGoCandidate}>查看回答页面</button><button type="button" className="pointask-secondary" onClick={props.onCancel}>取消等待</button></>}
-        {answerReady && thread.answerMode === 'current_conversation' && <><button type="button" className="pointask-primary" onClick={props.onAttachCandidate}>一键附加</button><button type="button" className="pointask-secondary" onClick={props.onGoCandidate}>查看回答</button></>}
-        {answerReady && thread.answerMode !== 'current_conversation' && <button type="button" className="pointask-primary" onClick={props.onOpenAnswer}>查看回答</button>}
-        {attached && <><button type="button" className="pointask-primary" onClick={props.onContinue}>继续追问</button>{latestAnswer?.answerSource && <button type="button" className="pointask-secondary" onClick={() => props.onViewAnswer(latestAnswer.answerSource!)}>查看原回答</button>}</>}
-      </div>
     </div>}
   </pointask-thread-card>;
 }

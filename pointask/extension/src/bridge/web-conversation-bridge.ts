@@ -131,7 +131,7 @@ export class WebConversationBridge {
       const internal = response?.error || '';
       const friendly = /another source tab|cannot be updated from this tab|source tab|associated.*unavailable|cannot be associated/i.test(internal)
         ? '当前页面关联已失效，请重新关联后继续。'
-        : internal || 'PointAsk 操作失败，请稍后重试。';
+        : internal && /[\u3400-\u9fff]/.test(internal) ? internal : '操作失败，请重试。';
       throw new Error(friendly);
     }
     return response.data as T;

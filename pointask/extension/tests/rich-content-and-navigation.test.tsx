@@ -11,6 +11,7 @@ import { STORAGE_KEYS } from '../src/storage/storage-schema';
 import { stableTextHash } from '../src/shared/text-utils';
 import { MemoryStorageDriver } from '../src/storage/storage-driver';
 import { NavigationStore } from '../src/storage/navigation-store';
+import { applyPointAskTheme } from '../src/content/theme';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -19,6 +20,11 @@ function range(start: Node, startOffset: number, end: Node, endOffset: number): 
 }
 
 describe('rich ChatGPT content', () => {
+  it('derives a dark semantic theme from the nearby ChatGPT surface', () => {
+    const reference = document.createElement('div'); reference.style.backgroundColor = 'rgb(32, 33, 35)'; reference.style.fontFamily = 'Arial';
+    const host = document.createElement('pointask-theme-test'); document.body.append(reference, host); applyPointAskTheme(host, reference);
+    expect(host.dataset.pointaskTheme).toBe('dark'); expect(host.style.getPropertyValue('--pointask-font')).toContain('Arial');
+  });
   it('extracts text plus an atomic ending formula using TeX annotation', () => {
     document.body.innerHTML = '<p id="p">能量 <span class="katex"><span>零散视觉字符</span><math><semantics><annotation encoding="application/x-tex">E=mc^2</annotation></semantics></math></span></p>';
     const paragraph = document.getElementById('p')!;
@@ -109,6 +115,20 @@ describe('rich ChatGPT content', () => {
       { type: 'unordered_list', items: [{ type: 'list_item', children: [{ type: 'block_math', latex: '\\sum_i i' }] }] },
     ]);
   });
+
+  it('preserves rendered ChatGPT headings and tables instead of flattening them into text', async () => {
+    document.body.innerHTML = '<div id="document"><h2>结果</h2><table><thead><tr><th>变量</th><th>值</th></tr></thead><tbody><tr><td><code>x</code></td><td>2</td></tr></tbody></table></div>';
+    const selection = document.createRange(); selection.selectNodeContents(document.getElementById('document')!);
+    const rich = extractRichContent(selection);
+    expect(rich.blocks[0]).toMatchObject({ type: 'heading', level: 2 });
+    expect(rich.blocks[1]).toMatchObject({ type: 'table', rows: [{ type: 'table_row' }, { type: 'table_row' }] });
+    const container = document.createElement('div'); const root = createRoot(container);
+    await act(() => root.render(<RichContentRenderer blocks={rich.blocks} />));
+    expect(container.querySelector('h2')?.textContent).toBe('结果');
+    expect(container.querySelectorAll('table tr')).toHaveLength(2);
+    expect(container.querySelector('tbody td code')?.textContent).toBe('x');
+    await act(() => root.unmount());
+  });
 });
 
 describe('explicit composer fill and candidate matching', () => {
@@ -139,6 +159,17 @@ describe('explicit composer fill and candidate matching', () => {
     expect(candidate).toBeNull();
     expect(adapter.findCandidateAnswer(stableTextHash('提示词'), [])?.fingerprint).toBeTruthy();
     expect(extractWhole).not.toHaveBeenCalled();
+  });
+
+  it('matches a normalized user prompt across harmless tool turns and ignores user action controls', () => {
+    const prompt = '[PointAsk：PA-001]\n\n我的局部问题：\n为什么？';
+    document.body.innerHTML = `<article data-testid="conversation-turn-user"><div data-message-author-role="user">
+      <div data-message-content>${prompt}</div><button>编辑</button></div></article>
+      <article data-testid="conversation-turn-tool"><div data-tool-status>工具状态</div></article>
+      <article data-testid="conversation-turn-answer"><div data-message-author-role="assistant"><div class="markdown">对应回答</div></div></article>`;
+    const adapter = new ChatGptAdapter();
+    const candidate = adapter.findCandidateAnswer(stableTextHash(prompt), []);
+    expect(candidate?.element.getAttribute('data-testid')).toBe('conversation-turn-answer');
   });
 });
 

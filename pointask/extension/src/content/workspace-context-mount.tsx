@@ -2,6 +2,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { WorkspaceContextUpdater } from '../components/workspace-context-updater';
 import type { PointAskWorkspace, WorkspaceContextMessage } from '../shared/local-thread';
 import { threadStyles } from './shadow-styles';
+import { applyPointAskTheme } from './theme';
 
 export class WorkspaceContextMount {
   private host: HTMLElement | null = null;
@@ -13,6 +14,7 @@ export class WorkspaceContextMount {
   }): void {
     this.close();
     this.host = document.createElement('pointask-workspace-context-updater'); this.host.dataset.pointaskOwned = 'true';
+    applyPointAskTheme(this.host);
     const shadow = this.host.attachShadow({ mode: 'open' }); const style = document.createElement('style'); style.textContent = threadStyles;
     const mount = document.createElement('div'); shadow.append(style, mount); document.documentElement.append(this.host);
     this.root = createRoot(mount); this.root.render(<WorkspaceContextUpdater workspace={workspace} messages={messages}
