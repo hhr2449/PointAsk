@@ -1,7 +1,7 @@
 import type { PendingThread } from '../bridge/pending-thread-manager';
 import type { LocalThread, PointAskWorkspace } from '../shared/local-thread';
 
-export const STORAGE_SCHEMA_VERSION = 5;
+export const STORAGE_SCHEMA_VERSION = 6;
 export const STORAGE_KEYS = {
   threads: 'pointask:threads',
   pendingThreads: 'pointask:pending-threads',
@@ -19,6 +19,7 @@ export interface PointAskSettings {
   displayIdCounters?: Record<string, number>;
   currentConversationScrollBehavior: 'stay_at_source' | 'follow_response';
   closeDedicatedTabAfterAttach: boolean;
+  autoActionAuthorized: boolean;
 }
 
 export interface PointAskStorageSchema {
@@ -36,4 +37,5 @@ export const DEFAULT_SETTINGS: PointAskSettings = {
   displayIdCounters: {},
   currentConversationScrollBehavior: 'stay_at_source',
   closeDedicatedTabAfterAttach: false,
+  autoActionAuthorized: false,
 };

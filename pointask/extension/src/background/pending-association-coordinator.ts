@@ -1,5 +1,5 @@
 import type { PendingThread } from '../bridge/pending-thread-manager';
-import type { PendingAssociation } from '../bridge/runtime-messages';
+import { isCompatibleChatGptTargetUrl, type PendingAssociation } from '../bridge/runtime-messages';
 import type { AnswerSourceLocator, LocalMessage, LocalThread, RichContentBlock } from '../shared/local-thread';
 import { textBlocks } from '../shared/rich-content';
 
@@ -204,6 +204,22 @@ export class PendingAssociationCoordinator {
     return this.update(id, {
       pendingThread: { ...record.pendingThread, candidateAnswerFingerprint: fingerprint, status, updatedAt: this.now().toISOString() },
       localThread: { ...record.localThread, status, updatedAt: this.now().toISOString() },
+    });
+  }
+
+  reserveSubmission(id: string, senderTabId: number, promptHash: string, targetUrl: string): PendingAssociation | null {
+    const record = this.get(id);
+    if (!record || record.targetTabId !== senderTabId || record.associationStatus === 'cancelled' ||
+      record.pendingThread.promptHash !== promptHash || record.pendingThread.submittedPromptHash === promptHash) return null;
+    const validTarget = record.localThread.answerMode === 'current_conversation'
+      ? isCompatibleChatGptTargetUrl(record.localThread.sourceConversationKey, targetUrl)
+      : Boolean(record.targetConversationUrl && isCompatibleChatGptTargetUrl(record.targetConversationUrl, targetUrl));
+    if (!validTarget) return null;
+    const timestamp = this.now().toISOString();
+    return this.update(id, {
+      pendingThread: { ...record.pendingThread, submittedPromptHash: promptHash, submittedAt: timestamp, status: 'waiting_for_answer', updatedAt: timestamp },
+      localThread: { ...record.localThread, status: 'waiting_for_answer', updatedAt: timestamp },
+      associationStatus: 'associated',
     });
   }
 

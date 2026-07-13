@@ -23,6 +23,8 @@ export interface SiteAdapter {
   findAssistantMessageByFingerprint(fingerprint: string): HTMLElement | null;
   isMessageStreaming(element: HTMLElement): boolean;
   fillComposer(prompt: string): boolean;
+  canSubmitComposer(): boolean;
+  submitComposer(): boolean;
   findCandidateAnswer(promptHash: string, assistantFingerprintsBefore: string[]): CandidateAnswer | null;
   resolveAnswerSource(locator: AnswerSourceLocator): HTMLElement | null;
   getRecoveryMountElement(): HTMLElement | null;

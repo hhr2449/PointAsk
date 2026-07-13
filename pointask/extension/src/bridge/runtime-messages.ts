@@ -37,7 +37,8 @@ export type PointAskRuntimeMessage =
   | { type: 'pointask:complete-navigation'; navigationId: string }
   | { type: 'pointask:undo-attachment'; pendingThreadId: string }
   | { type: 'pointask:candidate-answer-state'; pendingThreadId: string; fingerprint: string; streaming: boolean }
-  | { type: 'pointask:open-workspace-context-update'; workspaceId: string };
+  | { type: 'pointask:open-workspace-context-update'; workspaceId: string }
+  | { type: 'pointask:reserve-prompt-submission'; pendingThreadId: string; promptHash: string; targetUrl: string };
 
 const messageTypes = new Set([
   'pointask:create-pending-thread',
@@ -57,6 +58,7 @@ const messageTypes = new Set([
   'pointask:undo-attachment',
   'pointask:candidate-answer-state',
   'pointask:open-workspace-context-update',
+  'pointask:reserve-prompt-submission',
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -79,7 +81,7 @@ export function isPendingThread(value: unknown): value is PendingThread {
     'generatedPrompt', 'promptMode', 'status', 'createdAt', 'updatedAt', 'targetConversationUrl',
     'displayId', 'answerMode', 'workspaceId',
     'threadId', 'targetTabId', 'targetConversationKey', 'promptHash', 'assistantFingerprintsBefore',
-    'candidateAnswerFingerprint', 'richSelection', 'viewAnchor',
+    'candidateAnswerFingerprint', 'richSelection', 'viewAnchor', 'submittedPromptHash', 'submittedAt',
   ]) && hasOnlyKeys(anchor, [
     'pageUrl', 'sourcePageUrl', 'conversationKey', 'messageFingerprint', 'assistantMessageHash', 'selectedText',
     'prefixText', 'suffixText', 'paragraphText', 'paragraphHash', 'startOffset', 'endOffset', 'blockIndex',
@@ -102,6 +104,8 @@ export function isPendingThread(value: unknown): value is PendingThread {
     (value.promptHash === undefined || typeof value.promptHash === 'string') &&
     (value.assistantFingerprintsBefore === undefined || Array.isArray(value.assistantFingerprintsBefore) && value.assistantFingerprintsBefore.every(isNonEmptyString)) &&
     (value.candidateAnswerFingerprint === undefined || isNonEmptyString(value.candidateAnswerFingerprint)) &&
+    (value.submittedPromptHash === undefined || isNonEmptyString(value.submittedPromptHash)) &&
+    (value.submittedAt === undefined || isNonEmptyString(value.submittedAt) && Number.isFinite(Date.parse(value.submittedAt))) &&
     (value.richSelection === undefined || isRichSelection(value.richSelection)) &&
     (value.viewAnchor === undefined || isViewAnchor(value.viewAnchor)) &&
     isChatGptUrl(value.sourcePageUrl as string) && isChatGptUrl(value.sourceConversationKey as string) &&
@@ -130,6 +134,9 @@ export function isPointAskRuntimeMessage(value: unknown): value is PointAskRunti
       return hasOnlyKeys(value, ['type', 'pendingThreadId']) && isNonEmptyString(value.pendingThreadId);
     case 'pointask:open-workspace-context-update':
       return hasOnlyKeys(value, ['type', 'workspaceId']) && isNonEmptyString(value.workspaceId);
+    case 'pointask:reserve-prompt-submission':
+      return hasOnlyKeys(value, ['type', 'pendingThreadId', 'promptHash', 'targetUrl']) && isNonEmptyString(value.pendingThreadId) &&
+        isNonEmptyString(value.promptHash) && isNonEmptyString(value.targetUrl) && isChatGptUrl(value.targetUrl);
     case 'pointask:associate-target-page':
       return hasOnlyKeys(value, ['type', 'pendingThreadId', 'targetUrl', 'confirmReassociation']) &&
         isNonEmptyString(value.pendingThreadId) && isNonEmptyString(value.targetUrl) && isChatGptUrl(value.targetUrl) &&

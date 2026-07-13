@@ -10,6 +10,8 @@ import type { CandidateAnswer } from '../adapters/site-adapter';
 import { richPlainText } from '../shared/rich-content';
 import { richContentStyles } from '../components/rich-content-renderer';
 import { ViewAnchorController } from './view-anchor-controller';
+import type { OperationAuthorizer } from './operation-authorizer';
+import { showAttachmentUndo } from './operation-feedback';
 
 export class PendingBannerManager {
   private readonly host: HTMLElement;
@@ -25,11 +27,13 @@ export class PendingBannerManager {
   private readonly candidates = new Map<string, CandidateAnswer>();
   private readonly candidateStates = new Map<string, string>();
   private cleanupCandidateObserver: (() => void) | null = null;
+  private readonly sendingIds = new Set<string>();
 
   constructor(
     private readonly bridge: WebConversationBridge,
     private readonly clipboard: ClipboardManager,
     private readonly adapter?: SiteAdapter,
+    private readonly authorizer?: OperationAuthorizer,
   ) {
     this.host = document.createElement('pointask-pending-thread-banner');
     this.host.dataset.pointaskOwned = 'true';
@@ -147,19 +151,23 @@ export class PendingBannerManager {
 
   private async fill(id: string): Promise<void> {
     const record = this.records.get(id);
-    if (!record) return;
-    if (this.adapter?.fillComposer(record.pendingThread.generatedPrompt)) {
-      this.copiedIds.delete(id);
-      this.errors.set(id, '已填入；请检查后手动发送');
-      this.render();
-      return;
-    }
-    const fallback = await this.clipboard.copy(record.pendingThread.generatedPrompt);
-    if (fallback.success) {
-      this.copiedIds.add(id);
-      this.errors.set(id, '无法填入，提示词已复制，请手动粘贴');
-    } else this.errors.set(id, fallback.error || '无法填入或复制提示词');
-    this.render();
+    if (!record || this.sendingIds.has(id)) return;
+    if (record.pendingThread.submittedPromptHash === record.pendingThread.promptHash) { this.errors.set(id, '该问题已经发送'); this.render(); return; }
+    if (this.authorizer && !(await this.authorizer.authorize())) return;
+    this.sendingIds.add(id); this.errors.set(id, '正在发送……'); this.render();
+    try {
+      if (!this.adapter?.fillComposer(record.pendingThread.generatedPrompt)) throw new Error('无法填入输入框');
+      let ready = this.adapter.canSubmitComposer();
+      for (let attempt = 0; !ready && attempt < 10; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 50)); ready = this.adapter.canSubmitComposer();
+      }
+      if (!ready) throw new Error('发送按钮当前不可用');
+      const reserved = await this.bridge.reservePromptSubmission(id, record.pendingThread.promptHash ?? '', window.location.href);
+      if (!this.adapter.submitComposer()) throw new Error('发送未完成；为避免重复提交，本轮不会自动重试');
+      this.records.set(id, reserved); this.errors.set(id, '已发送');
+    } catch (error) {
+      this.errors.set(id, error instanceof Error ? error.message : '操作失败，请重试');
+    } finally { this.sendingIds.delete(id); this.render(); }
   }
 
   private refreshCandidates(): void {
@@ -189,6 +197,7 @@ export class PendingBannerManager {
   private async attachWhole(id: string): Promise<void> {
     const record = this.records.get(id); const candidate = this.candidates.get(id);
     if (!record || !candidate || candidate.streaming) return;
+    if (this.authorizer && !(await this.authorizer.authorize())) return;
     try {
       const richContent = this.adapter?.getMessageRichContent(candidate.element);
       if (!richContent?.blocks.length) throw new Error('无法安全读取这条回答');
@@ -206,6 +215,7 @@ export class PendingBannerManager {
       );
       if (updated.localThread.answerMode === 'current_conversation' && updated.localThread.status === 'answer_attached') this.records.delete(id);
       else this.records.set(id, updated);
+      showAttachmentUndo(this.bridge, updated, (restored) => { this.records.set(id, restored); this.render(); });
       this.candidates.delete(id);
       this.render();
     } catch (error) {

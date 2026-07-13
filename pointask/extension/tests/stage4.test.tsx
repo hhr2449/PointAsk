@@ -54,6 +54,15 @@ describe('runtime validation', () => {
 });
 
 describe('pending association state', () => {
+  it('reserves each prompt hash only once after an explicit send action', () => {
+    const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
+    const record = coordinator.create({ ...pending(), promptHash: 'hash-one' }, 1);
+    coordinator.markTargetOpened(record.pendingThread.id, 2, 'https://chatgpt.com/c/target');
+    expect(coordinator.reserveSubmission(record.pendingThread.id, 2, 'hash-one', 'https://chatgpt.com/c/target')?.pendingThread.submittedPromptHash).toBe('hash-one');
+    expect(coordinator.reserveSubmission(record.pendingThread.id, 2, 'hash-one', 'https://chatgpt.com/c/target')).toBeNull();
+    expect(coordinator.reserveSubmission(record.pendingThread.id, 3, 'hash-one', 'https://chatgpt.com/c/target')).toBeNull();
+  });
+
   it('keeps multiple pending threads isolated by ID and tab association', () => {
     const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
     coordinator.create(pending('one'), 1);

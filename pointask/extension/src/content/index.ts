@@ -21,6 +21,8 @@ import { AnswerNavigationManager } from './answer-navigation-manager';
 import { WorkspaceContextMount } from './workspace-context-mount';
 import { WorkspaceContextBannerManager } from './workspace-context-banner-manager';
 import { buildWorkspaceContextUpdatePrompt } from '../bridge/prompt-builder';
+import { OperationAuthorizer } from './operation-authorizer';
+import { showAttachmentUndo } from './operation-feedback';
 
 const adapter = new ChatGptAdapter();
 
@@ -36,13 +38,14 @@ if (adapter.isSupportedPage()) {
   const settingsStore = new SettingsStore(storageDriver);
   const metrics = new MetricsStore(storageDriver);
   const workspaceStore = new WorkspaceStore(storageDriver);
+  const operationAuthorizer = new OperationAuthorizer(settingsStore);
   const pendingThreads = new PendingThreadManager();
   const threads = new InlineThreadManager(
     pendingThreads, clipboard, webBridge, undefined, undefined, threadStore, pendingStore, metrics, workspaceStore, adapter,
   );
   const answerModeMount = new AnswerModeMount();
-  const banner = new PendingBannerManager(webBridge, clipboard, adapter);
-  const attachment = new AnswerAttachmentMount(webBridge);
+  const banner = new PendingBannerManager(webBridge, clipboard, adapter, operationAuthorizer);
+  const attachment = new AnswerAttachmentMount(webBridge, operationAuthorizer);
   const answerNavigation = new AnswerNavigationManager(adapter, webBridge);
   const workspaceContextMount = new WorkspaceContextMount();
   const workspaceContextBanner = new WorkspaceContextBannerManager(workspaceStore, adapter, clipboard);
@@ -183,6 +186,7 @@ if (adapter.isSupportedPage()) {
         (record) => {
           banner.applyRecord(record);
           threads.handleAssociationUpdate(record);
+          showAttachmentUndo(webBridge, record, (restored) => { banner.applyRecord(restored); threads.handleAssociationUpdate(restored); });
         },
         () => {
           toolbar.show(data, banner.getAttachmentAssociations());

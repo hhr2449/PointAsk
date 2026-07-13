@@ -48,7 +48,7 @@ export function ThreadCard(props: ThreadCardProps) {
     </header>
     {expanded && <div className="pointask-thread-body">
       <div className="pointask-status" role="status"><strong>{thread.displayId} · {modeLabel}</strong><br />
-        {waitingSubmission ? '等待你填入并手动发送' : waitingAnswer ? '正在等待 ChatGPT 回答' : answerReady ? '回答已生成，等待你附加' : attached ? '回答已附加' : thread.status === 'failed' ? '当前操作已取消' : '无法定位原文'}</div>
+        {waitingSubmission ? '等待你点击发送' : waitingAnswer ? '正在等待 ChatGPT 回答' : answerReady ? '回答已生成，等待你附加' : attached ? '回答已附加' : thread.status === 'failed' ? '当前操作已取消' : '无法定位原文'}</div>
       {thread.answerMode === 'current_conversation' && <p className="pointask-warning">当前对话回答：此局部问答同时存在于 ChatGPT 主聊天记录中。</p>}
       {thread.answerMode === 'workspace' && props.workspace && <div className="pointask-workspace-context" role="status">
         <span>{props.workspace.contextState.status === 'fresh' ? '上下文已更新' : props.workspace.contextState.status === 'outdated'

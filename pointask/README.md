@@ -35,7 +35,7 @@ Threads and Workspaces survive page refreshes and tab replacement. Conversation 
 
 ## User-control boundary
 
-PointAsk never sends a ChatGPT message, calls a model API, uses a private ChatGPT endpoint, reads authentication data, or automatically captures an answer. Filling the visible composer and attaching a reliably matched whole answer each require a separate explicit user click.
+PointAsk never sends on page load, restoration, timers, or background activity. After a one-time authorization, it may fill and submit exactly one pending prompt only when the user clicks an explicitly labelled send button. It never calls a model API, uses a private ChatGPT endpoint, reads authentication data, or attaches an answer without a distinct user click.
 
 ## Structure
 

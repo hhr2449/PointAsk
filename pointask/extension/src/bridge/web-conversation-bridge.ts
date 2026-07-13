@@ -100,6 +100,9 @@ export class WebConversationBridge {
   async updateCandidateState(pendingThreadId: string, fingerprint: string, streaming: boolean): Promise<PendingAssociation> {
     return this.send({ type: 'pointask:candidate-answer-state', pendingThreadId, fingerprint, streaming });
   }
+  async reservePromptSubmission(pendingThreadId: string, promptHash: string, targetUrl = window.location.href): Promise<PendingAssociation> {
+    return this.send({ type: 'pointask:reserve-prompt-submission', pendingThreadId, promptHash, targetUrl });
+  }
 
   onPendingUpdated(callback: (record: PendingAssociation) => void): () => void {
     const listener = (message: unknown) => {

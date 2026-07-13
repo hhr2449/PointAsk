@@ -5,6 +5,7 @@ import { AnswerAttachmentConfirmation, MAX_ATTACHED_ANSWER_LENGTH } from '../com
 import { attachmentConfirmationStyles } from './shadow-styles';
 import type { SelectionData } from './selection-manager';
 import { richContentStyles } from '../components/rich-content-renderer';
+import type { OperationAuthorizer } from './operation-authorizer';
 
 export class AnswerAttachmentMount {
   private host: HTMLElement | null = null;
@@ -12,7 +13,7 @@ export class AnswerAttachmentMount {
   private submitting = false;
   private error: string | undefined;
 
-  constructor(private readonly bridge: WebConversationBridge) {}
+  constructor(private readonly bridge: WebConversationBridge, private readonly authorizer?: OperationAuthorizer) {}
 
   open(
     data: SelectionData,
@@ -21,6 +22,14 @@ export class AnswerAttachmentMount {
     onCancel: () => void,
   ): boolean {
     if (!data.selectedText || data.selectedText.length > MAX_ATTACHED_ANSWER_LENGTH) return false;
+    if (this.authorizer) {
+      void this.authorizer.authorize().then(async (allowed) => {
+        if (!allowed) { onCancel(); return; }
+        try { onAttached(await this.attach(data, association)); }
+        catch (error) { this.showFeedback(error instanceof Error ? error.message : '操作失败，请重试'); }
+      });
+      return true;
+    }
     this.close();
     this.error = undefined;
     const host = document.createElement('pointask-answer-attachment-confirmation');
@@ -52,25 +61,7 @@ export class AnswerAttachmentMount {
           this.submitting = true;
           render();
           try {
-            const pageRecords = await this.bridge.getPagePendingThreads();
-            const current = (Array.isArray(pageRecords) ? pageRecords : []).find((record) => record.pendingThread.id === association.pendingThread.id) ?? association;
-            const latestReplacing = current.localThread.messages.at(-1)?.role === 'assistant';
-            if (latestReplacing !== replacing) throw new Error('线程状态刚刚发生变化，请关闭后重新选择回答。');
-            const record = await this.bridge.attachAnswer(
-              association.pendingThread.id,
-              data.selectedText,
-              latestReplacing,
-              window.location.href,
-              data.richSelection?.blocks,
-              {
-                conversationUrl: window.location.href,
-                conversationKey: data.conversationKey,
-                messageFingerprint: data.messageFingerprint,
-                selectedText: data.selectedText,
-                prefixText: data.textAnchor?.prefixText,
-                suffixText: data.textAnchor?.suffixText,
-              },
-            );
+            const record = await this.attach(data, association, replacing);
             this.close();
             onAttached(record);
           } catch (error) {
@@ -92,5 +83,22 @@ export class AnswerAttachmentMount {
     this.host = null;
     this.submitting = false;
     this.error = undefined;
+  }
+
+  private async attach(data: SelectionData, association: PendingAssociation, expectedReplacing?: boolean): Promise<PendingAssociation> {
+    const pageRecords = await this.bridge.getPagePendingThreads();
+    const current = (Array.isArray(pageRecords) ? pageRecords : []).find((record) => record.pendingThread.id === association.pendingThread.id) ?? association;
+    const replacing = current.localThread.messages.at(-1)?.role === 'assistant';
+    if (expectedReplacing !== undefined && replacing !== expectedReplacing) throw new Error('线程状态刚刚发生变化，请重新选择回答。');
+    return this.bridge.attachAnswer(association.pendingThread.id, data.selectedText, replacing, window.location.href, data.richSelection?.blocks, {
+      conversationUrl: window.location.href, conversationKey: data.conversationKey, messageFingerprint: data.messageFingerprint,
+      selectedText: data.selectedText, prefixText: data.textAnchor?.prefixText, suffixText: data.textAnchor?.suffixText,
+    });
+  }
+
+  private showFeedback(message: string): void {
+    const host = document.createElement('pointask-operation-feedback'); host.dataset.pointaskOwned = 'true';
+    Object.assign(host.style, { position: 'fixed', zIndex: '2147483647', top: '16px', right: '16px', padding: '10px 14px', borderRadius: '9px', background: '#fff', boxShadow: '0 8px 24px #0003' });
+    host.textContent = message || '操作失败，请重试'; document.documentElement.append(host); setTimeout(() => host.remove(), 3_000);
   }
 }

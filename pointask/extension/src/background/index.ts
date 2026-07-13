@@ -335,6 +335,13 @@ export async function handleRuntimeMessage(
         await persist(record, deps); await notify(record, deps.tabs);
         return { ok: true, data: record };
       }
+      case 'pointask:reserve-prompt-submission': {
+        await ensureTargetRecord(message.pendingThreadId, senderTabId, sender.tab?.url, deps);
+        const record = deps.coordinator.reserveSubmission(message.pendingThreadId, senderTabId, message.promptHash, message.targetUrl);
+        if (!record) throw new Error('该问题已发送，或当前页面与线程不匹配');
+        await persist(record, deps); await notify(record, deps.tabs);
+        return { ok: true, data: record };
+      }
     }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : 'PointAsk runtime request failed' };

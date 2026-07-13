@@ -12,6 +12,7 @@ const BLOCK_SELECTOR = 'p, li, pre, blockquote, h1, h2, h3, h4, h5, h6';
 const STANDALONE_MATH_SELECTOR = '.katex-display, math[display="block"]';
 const OBSERVER_DEBOUNCE_MS = 100;
 const COMPOSER_SELECTOR = '#prompt-textarea, textarea[data-id="root"], [contenteditable="true"][data-placeholder]';
+const SEND_BUTTON_SELECTOR = '[data-testid="send-button"], button[aria-label*="Send"], button[aria-label*="发送"]';
 
 function elementFromNode(node: Node): Element | null {
   return node.nodeType === Node.ELEMENT_NODE ? (node as Element) : node.parentElement;
@@ -117,6 +118,16 @@ export class ChatGptAdapter implements SiteAdapter {
     }
     composer.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
     return composer instanceof HTMLTextAreaElement ? composer.value === prompt : composer.textContent === prompt;
+  }
+  canSubmitComposer(): boolean {
+    const button = document.querySelector<HTMLButtonElement>(SEND_BUTTON_SELECTOR);
+    return Boolean(button && !button.disabled && button.getAttribute('aria-disabled') !== 'true');
+  }
+  submitComposer(): boolean {
+    const button = document.querySelector<HTMLButtonElement>(SEND_BUTTON_SELECTOR);
+    if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return false;
+    button.click();
+    return true;
   }
   findCandidateAnswer(promptHash: string, assistantFingerprintsBefore: string[]): CandidateAnswer | null {
     if (!promptHash) return null;

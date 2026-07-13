@@ -11,7 +11,7 @@
 - **Prompt builder:** converts selected source context plus a local question into text the user can submit.
 - **Clipboard manager:** copies generated text only as part of a user-initiated flow and reports success or failure.
 - **Pending thread manager:** tracks a follow-up between prompt creation and manual answer attachment.
-- **Web conversation bridge:** persists prompts and coordinates visible ChatGPT tabs. Composer filling is delegated to the adapter and occurs only on an explicit button click; sending is never automated.
+- **Web conversation bridge:** persists prompts and coordinates visible ChatGPT tabs. Filling and submission are permitted only in the direct handler of an explicitly labelled send button after authorization. The background atomically reserves the current prompt hash before the adapter clicks the visible send control, preventing duplicate submission after refresh or repeated clicks.
 - **Rich-content extractor/renderer:** treats KaTeX, MathML, and code as atomic selection nodes, stores typed blocks, and renders LaTeX with bundled KaTeX inside each PointAsk Shadow Root.
 - **Answer navigation manager:** stores a short-lived locator, opens or activates the visible conversation, resolves the assistant fingerprint, scrolls, highlights, and clears the locator.
 - **Manual answer attachment:** accepts answer text only from an explicit user selection and attach action.
@@ -32,7 +32,7 @@ Source page: user selects text
   -> generate prompt
   -> save pending thread
   -> persist prompt and open/activate the chosen visible page
-Target page: user clicks fill and manually sends
+Target page: user clicks an explicit send action; PointAsk validates, reserves, fills, and submits once
   -> candidate recognition uses prompt hash plus message order, without reading answer content
   -> user selects part, or explicitly clicks to extract and attach the uniquely matched whole answer
   -> save local thread

@@ -87,6 +87,15 @@ describe('explicit composer fill and candidate matching', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it('submits only when the explicit submit operation is invoked and refuses a disabled button', () => {
+    document.body.innerHTML = '<div id="prompt-textarea" contenteditable="true"></div><button data-testid="send-button">发送</button>';
+    const adapter = new ChatGptAdapter(); const button = document.querySelector<HTMLButtonElement>('[data-testid="send-button"]')!;
+    const click = vi.spyOn(button, 'click'); adapter.fillComposer('明确点击后发送');
+    expect(click).not.toHaveBeenCalled(); expect(adapter.canSubmitComposer()).toBe(true);
+    expect(adapter.submitComposer()).toBe(true); expect(click).toHaveBeenCalledOnce();
+    button.disabled = true; expect(adapter.submitComposer()).toBe(false); expect(click).toHaveBeenCalledOnce();
+  });
+
   it('returns only the assistant immediately following the matching prompt', () => {
     document.body.innerHTML = '<article data-testid="conversation-turn-1"><div data-message-author-role="user"><div class="markdown">提示词</div></div></article><article data-testid="conversation-turn-2"><div data-message-author-role="assistant"><div class="markdown"><p>回答</p></div></div></article>';
     const adapter = new ChatGptAdapter();

@@ -4,6 +4,7 @@ import type { LocalThread, PointAskWorkspace } from '../shared/local-thread';
 import { normalizeRichBlocks } from '../shared/rich-content';
 import { DEFAULT_SETTINGS, STORAGE_KEYS, STORAGE_SCHEMA_VERSION, type PointAskSettings, type PointAskStorageSchema } from './storage-schema';
 import { withStorageLock, type StorageDriver } from './storage-driver';
+import { stableTextHash } from '../shared/text-utils';
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' ? value as Record<string, unknown> : null;
@@ -65,7 +66,7 @@ export function migrateStorage(raw: Record<string, unknown>): PointAskStorageSch
         answerMode: item.answerMode ?? thread.answerMode,
         workspaceId: item.workspaceId ?? thread.workspaceId,
         threadId: item.threadId ?? thread.id,
-        promptHash: typeof item.promptHash === 'string' ? item.promptHash : '',
+        promptHash: typeof item.promptHash === 'string' && item.promptHash ? item.promptHash : stableTextHash(String(item.generatedPrompt ?? '')),
         assistantFingerprintsBefore: Array.isArray(item.assistantFingerprintsBefore) ? item.assistantFingerprintsBefore : [],
       };
     }).filter(isPendingThread) as unknown as PendingThread[];
@@ -107,6 +108,7 @@ export function migrateStorage(raw: Record<string, unknown>): PointAskStorageSch
     },
     currentConversationScrollBehavior: rawSettings?.currentConversationScrollBehavior === 'follow_response' ? 'follow_response' : 'stay_at_source',
     closeDedicatedTabAfterAttach: rawSettings?.closeDedicatedTabAfterAttach === true,
+    autoActionAuthorized: rawSettings?.autoActionAuthorized === true,
   };
   return { version: STORAGE_SCHEMA_VERSION, threads, pendingThreads, workspaces, settings };
 }

@@ -27,6 +27,8 @@ export interface PendingThread {
   candidateAnswerFingerprint?: string;
   richSelection?: RichSelection;
   viewAnchor?: ViewAnchor;
+  submittedPromptHash?: string;
+  submittedAt?: string;
 }
 
 export interface CreatePendingThreadInput {
@@ -111,6 +113,8 @@ export class PendingThreadManager {
       generatedPrompt: generatedPrompt.trim(),
       promptHash: stableTextHash(generatedPrompt),
       candidateAnswerFingerprint: undefined,
+      submittedPromptHash: undefined,
+      submittedAt: undefined,
       assistantFingerprintsBefore: assistantFingerprintsBefore ?? thread.assistantFingerprintsBefore,
       promptMode,
       status: 'prompt_ready',

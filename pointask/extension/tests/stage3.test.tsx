@@ -161,7 +161,7 @@ describe('pending thread card flow', () => {
     if (!threadId) throw new Error('Expected a pending thread ID');
     await act(() => manager.toggle(threadId));
     expect(manager.getThread(threadId)?.status).toBe('prompt_ready');
-    expect(manager.getHost(threadId)?.shadowRoot?.textContent).toContain('等待你填入并手动发送');
+    expect(manager.getHost(threadId)?.shadowRoot?.textContent).toContain('等待你点击发送');
 
     await act(async () => { await manager.copy(threadId); });
     expect(writeText).toHaveBeenCalledOnce();

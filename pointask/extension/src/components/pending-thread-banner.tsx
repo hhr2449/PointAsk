@@ -24,7 +24,7 @@ function summary(text: string): string {
 }
 
 export function PendingThreadBanner({
-  records, copiedIds, errors, confirmingIds, candidates, onCopy, onFill, onAssociate, onReturn, onCancel, onClose, onAttachWhole, onSelectPartial, onUndo,
+  records, copiedIds, errors, confirmingIds, candidates, onFill, onAssociate, onReturn, onCancel, onClose, onAttachWhole, onSelectPartial, onUndo,
 }: PendingThreadBannerProps) {
   return (
     <div className="pointask-banner-list" aria-label="PointAsk 等待回答线程">
@@ -70,12 +70,18 @@ export function PendingThreadBanner({
                   <button type="button" className="pointask-secondary" onClick={() => onReturn(pending.id)}>返回原文</button>
                 </div>
               </>
+            ) : pending.submittedPromptHash === pending.promptHash ? (
+              <><p>已发送，正在等待回答。</p><div className="pointask-banner-actions">
+                <button type="button" className="pointask-secondary" onClick={() => onReturn(pending.id)}>返回原文</button>
+                <button type="button" className="pointask-secondary" onClick={() => onCancel(pending.id)}>取消等待</button>
+              </div></>
             ) : (
               <>
-                <p>点击填入后请检查内容，并由你手动发送。PointAsk 不会自动发送。</p>
+                <p>发送只会在你点击下方按钮后执行；恢复页面不会自动发送。</p>
                 <div className="pointask-banner-actions">
-                  <button type="button" className="pointask-primary" onClick={() => onFill(pending.id)}>填入输入框</button>
-                  <button type="button" className="pointask-secondary" onClick={() => onCopy(pending.id)}>备用：复制提示词</button>
+                  <button type="button" className="pointask-primary" onClick={() => onFill(pending.id)}>
+                    {record.localThread.answerMode === 'current_conversation' ? '发送到当前对话' : '发送到追问空间'}
+                  </button>
                   <button type="button" className="pointask-secondary" onClick={() => onSelectPartial(pending.id)}>前往选择回答</button>
                   <button type="button" className="pointask-secondary" onClick={() => onReturn(pending.id)}>返回来源页面</button>
                   <button type="button" className="pointask-secondary" onClick={() => onCancel(pending.id)}>取消关联</button>

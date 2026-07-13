@@ -9,8 +9,9 @@ PointAsk is a Chrome extension that lets a user ask a follow-up about text they 
 - Do not implement a backend, accounts, cloud sync, or external persistence.
 - Do not access ChatGPT private APIs.
 - Do not read ChatGPT cookies, login tokens, or account authentication data.
-- Do not inject, submit, or automatically send a question.
-- Do not automatically scrape, monitor, or capture complete answers.
+- Do not send on page load, question creation, PendingThread restoration, timers, background jobs, or batch operations.
+- A send or whole-answer attachment may run only as the direct result of the user clicking an explicitly labelled PointAsk action button. A remembered authorization may skip repeated confirmation, but never replaces that per-operation click.
+- Do not automatically scrape, monitor, or capture complete answers. A reliably matched whole answer may be captured only after the user explicitly clicks the one-click attachment action.
 - Only content that the user explicitly selects and attaches may be saved.
 - When ChatGPT DOM behavior is uncertain, fail safely instead of operating on the wrong page element.
 
@@ -32,4 +33,3 @@ PointAsk is a Chrome extension that lets a user ask a follow-up about text they 
 - Run the smallest relevant lint, test, and build checks after changes.
 - Never claim a command was run unless it actually was.
 - Do not create Git commits automatically.
-

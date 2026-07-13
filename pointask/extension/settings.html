@@ -7,5 +7,7 @@
 <label>Pending 有效时长（小时）<input id="pointask-expiry" type="number" min="1" max="168"></label>
 <label>当前对话回答时的滚动方式<select id="pointask-scroll-behavior"><option value="stay_at_source">停留在原文（默认）</option><option value="follow_response">跟随新回答</option></select></label>
 <label><input id="pointask-close-dedicated" type="checkbox"> 附加并返回原文后关闭独立回答标签页</label>
+<label>自动操作授权 <strong id="pointask-authorization-state">未开启</strong></label>
+<button id="pointask-revoke-authorization" type="button">撤销授权并恢复每次确认</button>
 </fieldset><button id="pointask-save">保存设置</button><button id="pointask-export">导出本地指标</button><button id="pointask-clear">清除全部 PointAsk 数据</button>
 <p><a href="privacy.html" target="_blank" rel="noreferrer">查看隐私说明</a></p><p>版本：0.1.0</p><p id="pointask-status" role="status"></p><script src="settings.js"></script></body></html>
