@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>PointAsk 设置</title>
+<style>body{font:15px/1.5 system-ui,sans-serif;max-width:680px;margin:40px auto;padding:0 20px;color:#202123}fieldset{border:1px solid #ddd;border-radius:12px;padding:18px;display:grid;gap:14px}label{display:grid;gap:5px}button{padding:8px 12px;margin:12px 8px 0 0}#pointask-status{min-height:24px;color:#08775f}</style></head>
+<body><h1>PointAsk 设置</h1><fieldset>
+<label>默认提示词模式<select id="pointask-prompt-mode"><option value="compact">精简</option><option value="contextual">上下文</option></select></label>
+<label><input id="pointask-expand" type="checkbox"> 新线程默认展开</label>
+<label>Pending 有效时长（小时）<input id="pointask-expiry" type="number" min="1" max="168"></label>
+<label>当前对话回答时的滚动方式<select id="pointask-scroll-behavior"><option value="stay_at_source">停留在原文（默认）</option><option value="follow_response">跟随新回答</option></select></label>
+<label><input id="pointask-close-dedicated" type="checkbox"> 附加并返回原文后关闭独立回答标签页</label>
+</fieldset><button id="pointask-save">保存设置</button><button id="pointask-export">导出本地指标</button><button id="pointask-clear">清除全部 PointAsk 数据</button>
+<p><a href="privacy.html" target="_blank" rel="noreferrer">查看隐私说明</a></p><p>版本：0.1.0</p><p id="pointask-status" role="status"></p><script src="settings.js"></script></body></html>
