@@ -129,6 +129,7 @@ export interface LocalMessage {
 }
 
 export type RoundPersistenceStatus = 'not_captured' | 'staged' | 'attaching' | 'attached' | 'capture_failed';
+export type RoundAttachmentStatus = 'available' | 'skipped_retained' | 'skipped_expired' | 'attached';
 
 export interface LocalThreadRound {
   /** Stable round identity. Never reuse a pending or message id here. */
@@ -143,7 +144,10 @@ export interface LocalThreadRound {
   candidateAnswerFingerprint?: string;
   status: 'waiting_for_submission' | 'waiting_for_answer' | 'generating' | 'answer_ready' | 'failed' | 'attached';
   persistenceStatus: RoundPersistenceStatus;
+  attachmentStatus?: RoundAttachmentStatus;
   stagedAnswer?: RichContentBlock[];
+  skippedAt?: number;
+  expiresAt?: number;
   capturedAt?: string;
   attachedAt?: string;
   answerSource?: AnswerSourceLocator;

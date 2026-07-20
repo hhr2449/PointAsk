@@ -3,6 +3,7 @@ import type { PendingThread } from '../bridge/pending-thread-manager';
 import { STORAGE_KEYS, STORAGE_SCHEMA_VERSION } from './storage-schema';
 import { migrateStorage } from './migration';
 import { withStorageLock, type StorageDriver } from './storage-driver';
+import { cleanupExpiredStagedAnswers as cleanupThreads } from '../shared/staged-answer-retention';
 
 export class ThreadStore {
   private queue: Promise<unknown> = Promise.resolve();
@@ -11,22 +12,24 @@ export class ThreadStore {
   async list(): Promise<LocalThread[]> {
     const raw = await this.driver.get([STORAGE_KEYS.threads, STORAGE_KEYS.schemaVersion]);
     const schema = migrateStorage(raw);
-    if (raw[STORAGE_KEYS.schemaVersion] !== STORAGE_SCHEMA_VERSION) await this.write(schema.threads);
-    return schema.threads;
+    const cleaned = cleanupThreads(schema.threads, Date.now());
+    if (raw[STORAGE_KEYS.schemaVersion] !== STORAGE_SCHEMA_VERSION || cleaned.changed) await this.write(cleaned.threads);
+    return cleaned.threads;
   }
   async get(id: string): Promise<LocalThread | null> { return (await this.list()).find((thread) => thread.id === id) ?? null; }
   async listByConversation(conversationKey: string): Promise<LocalThread[]> {
     return (await this.list()).filter((thread) => thread.sourceConversationKey === conversationKey);
   }
   async upsert(thread: LocalThread): Promise<void> {
-    await this.mutate((threads) => [...threads.filter((item) => item.id !== thread.id), thread]);
+    await this.mutate((threads) => cleanupThreads([...threads.filter((item) => item.id !== thread.id), thread], Date.now()).threads);
   }
   async upsertAssociation(thread: LocalThread, pending: PendingThread): Promise<void> {
     await withStorageLock('association', async () => {
       const raw = await this.driver.get([STORAGE_KEYS.threads, STORAGE_KEYS.pendingThreads, STORAGE_KEYS.schemaVersion]);
       const schema = migrateStorage(raw); const threadId = pending.threadId || pending.id;
+      const cleaned = cleanupThreads([...schema.threads.filter((item) => item.id !== thread.id), thread], Date.now()).threads;
       await this.driver.set({
-        [STORAGE_KEYS.threads]: [...schema.threads.filter((item) => item.id !== thread.id), thread],
+        [STORAGE_KEYS.threads]: cleaned,
         [STORAGE_KEYS.pendingThreads]: [...schema.pendingThreads.filter((item) => (item.threadId || item.id) !== threadId), pending],
         [STORAGE_KEYS.schemaVersion]: STORAGE_SCHEMA_VERSION,
       });
@@ -39,6 +42,17 @@ export class ThreadStore {
       return threads.filter((thread) => thread.id !== id);
     });
     return deleted;
+  }
+  async cleanupExpiredStagedAnswers(now = Date.now()): Promise<number> {
+    return withStorageLock('threads', async () => {
+      const raw = await this.driver.get([STORAGE_KEYS.threads, STORAGE_KEYS.schemaVersion]);
+      const threads = migrateStorage(raw).threads;
+      const before = threads.flatMap((thread) => thread.rounds ?? []).filter((round) => round.stagedAnswer).length;
+      const result = cleanupThreads(threads, now);
+      const after = result.threads.flatMap((thread) => thread.rounds ?? []).filter((round) => round.stagedAnswer).length;
+      if (result.changed || raw[STORAGE_KEYS.schemaVersion] !== STORAGE_SCHEMA_VERSION) await this.write(result.threads);
+      return before - after;
+    });
   }
   async allocateDisplayId(sourceConversationKey: string): Promise<string> {
     return withStorageLock('display-id', async () => {

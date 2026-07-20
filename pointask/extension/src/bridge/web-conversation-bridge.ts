@@ -67,8 +67,9 @@ export class WebConversationBridge {
     });
   }
 
-  async attachRounds(pendingThreadId: string, rounds: AttachedRoundPayload[], targetUrl = window.location.href): Promise<PendingAssociation> {
-    return this.send({ type: 'pointask:attach-rounds', pendingThreadId, rounds, targetUrl });
+  async attachRounds(pendingThreadId: string, rounds: AttachedRoundPayload[], targetUrl = window.location.href,
+    skippedRoundIds?: string[]): Promise<PendingAssociation> {
+    return this.send({ type: 'pointask:attach-rounds', pendingThreadId, rounds, targetUrl, skippedRoundIds });
   }
 
   async stageRoundAnswer(pendingThreadId: string, roundId: string, promptHash: string, options: {
@@ -93,6 +94,9 @@ export class WebConversationBridge {
 
   async unlinkTargetPage(pendingThreadId: string): Promise<PendingAssociation> {
     return this.send({ type: 'pointask:unlink-target-page', pendingThreadId });
+  }
+  async deleteThreadData(threadId: string): Promise<void> {
+    await this.send({ type: 'pointask:delete-thread-data', threadId });
   }
 
   async getPagePendingThreads(currentUrl = window.location.href): Promise<PendingAssociation[]> {

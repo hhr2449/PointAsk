@@ -34,12 +34,13 @@ export type PointAskRuntimeMessage =
   | { type: 'pointask:pending-thread-updated'; pendingThreadId: string; action: 'manual-branch' | 'return-source' }
   | { type: 'pointask:cancel-pending-thread'; pendingThreadId: string }
   | { type: 'pointask:attach-answer'; pendingThreadId: string; selectedText?: string; richContent?: RichContentBlock[]; answerSource?: AnswerSourceLocator; targetUrl: string; replace: boolean }
-  | { type: 'pointask:attach-rounds'; pendingThreadId: string; rounds: AttachedRoundPayload[]; targetUrl: string }
+  | { type: 'pointask:attach-rounds'; pendingThreadId: string; rounds: AttachedRoundPayload[]; skippedRoundIds?: string[]; targetUrl: string }
   | { type: 'pointask:stage-round-answer'; pendingThreadId: string; roundId: string; promptHash: string; targetUrl: string;
       captureFailed: boolean; richContent?: RichContentBlock[]; answerSource?: AnswerSourceLocator }
   | { type: 'pointask:open-answer-page'; pendingThreadId: string }
   | { type: 'pointask:update-local-thread'; pendingThread: PendingThread; localThread: LocalThread }
   | { type: 'pointask:unlink-target-page'; pendingThreadId: string }
+  | { type: 'pointask:delete-thread-data'; threadId: string }
   | { type: 'pointask:get-page-pending-threads'; currentUrl: string }
   | { type: 'pointask:get-source-threads'; conversationKey: string }
   | { type: 'pointask:navigate-to-answer'; threadId: string; locator: AnswerSourceLocator }
@@ -65,6 +66,7 @@ const messageTypes = new Set([
   'pointask:open-answer-page',
   'pointask:update-local-thread',
   'pointask:unlink-target-page',
+  'pointask:delete-thread-data',
   'pointask:get-page-pending-threads',
   'pointask:get-source-threads',
   'pointask:navigate-to-answer',
@@ -155,6 +157,8 @@ export function isPointAskRuntimeMessage(value: unknown): value is PointAskRunti
         isNonEmptyString(value.pendingThreadId) && isNonEmptyString(value.promptHash) && isNonEmptyString(value.attemptId);
     case 'pointask:open-workspace-context-update':
       return hasOnlyKeys(value, ['type', 'workspaceId']) && isNonEmptyString(value.workspaceId);
+    case 'pointask:delete-thread-data':
+      return hasOnlyKeys(value, ['type', 'threadId']) && isNonEmptyString(value.threadId);
     case 'pointask:reserve-prompt-submission':
       return hasOnlyKeys(value, ['type', 'pendingThreadId', 'promptHash', 'targetUrl']) && isNonEmptyString(value.pendingThreadId) &&
         isNonEmptyString(value.promptHash) && isNonEmptyString(value.targetUrl) && isChatGptUrl(value.targetUrl);
@@ -171,10 +175,12 @@ export function isPointAskRuntimeMessage(value: unknown): value is PointAskRunti
         (value.answerSource === undefined || isAnswerSource(value.answerSource)) &&
         isNonEmptyString(value.targetUrl) && isChatGptUrl(value.targetUrl) && typeof value.replace === 'boolean';
     case 'pointask:attach-rounds':
-      return hasOnlyKeys(value, ['type', 'pendingThreadId', 'rounds', 'targetUrl']) && isNonEmptyString(value.pendingThreadId) &&
+      return hasOnlyKeys(value, ['type', 'pendingThreadId', 'rounds', 'skippedRoundIds', 'targetUrl']) && isNonEmptyString(value.pendingThreadId) &&
         isNonEmptyString(value.targetUrl) && isChatGptUrl(value.targetUrl) && Array.isArray(value.rounds) && value.rounds.length > 0 &&
         value.rounds.length <= 50 && value.rounds.every((raw) => isRecord(raw) && hasOnlyKeys(raw, ['roundId', 'richContent', 'answerSource']) &&
-          isNonEmptyString(raw.roundId) && isRichContent(raw.richContent) && isAnswerSource(raw.answerSource));
+          isNonEmptyString(raw.roundId) && isRichContent(raw.richContent) && isAnswerSource(raw.answerSource)) &&
+        (value.skippedRoundIds === undefined || Array.isArray(value.skippedRoundIds) && value.skippedRoundIds.length <= 50 &&
+          value.skippedRoundIds.every(isNonEmptyString));
     case 'pointask:stage-round-answer':
       return hasOnlyKeys(value, ['type', 'pendingThreadId', 'roundId', 'promptHash', 'targetUrl', 'captureFailed', 'richContent', 'answerSource']) &&
         [value.pendingThreadId, value.roundId, value.promptHash, value.targetUrl].every(isNonEmptyString) && isChatGptUrl(value.targetUrl as string) &&
@@ -325,14 +331,17 @@ export function isLocalThread(value: unknown): value is LocalThread {
   if (value.collapsedRoundIds !== undefined && (!Array.isArray(value.collapsedRoundIds) || !value.collapsedRoundIds.every(isNonEmptyString))) return false;
   if (value.rounds !== undefined && (!Array.isArray(value.rounds) || !value.rounds.every((raw) => {
     if (!isRecord(raw) || !hasOnlyKeys(raw, ['id', 'questionMessageId', 'answerMessageId', 'pendingId', 'promptHash', 'assistantFingerprintsBefore', 'candidateAnswerFingerprint',
-      'status', 'persistenceStatus', 'stagedAnswer', 'capturedAt', 'attachedAt', 'answerSource', 'createdAt', 'updatedAt'])) return false;
+      'status', 'persistenceStatus', 'attachmentStatus', 'stagedAnswer', 'skippedAt', 'expiresAt', 'capturedAt', 'attachedAt', 'answerSource', 'createdAt', 'updatedAt'])) return false;
     return ['id', 'pendingId', 'promptHash', 'createdAt', 'updatedAt'].every((key) => isNonEmptyString(raw[key])) &&
       (raw.questionMessageId === undefined || isNonEmptyString(raw.questionMessageId)) &&
       (raw.answerMessageId === undefined || isNonEmptyString(raw.answerMessageId)) &&
       Array.isArray(raw.assistantFingerprintsBefore) && raw.assistantFingerprintsBefore.every(isNonEmptyString) &&
       ['waiting_for_submission', 'waiting_for_answer', 'generating', 'answer_ready', 'failed', 'attached'].includes(String(raw.status)) &&
       ['not_captured', 'staged', 'attaching', 'attached', 'capture_failed'].includes(String(raw.persistenceStatus)) &&
+      (raw.attachmentStatus === undefined || ['available', 'skipped_retained', 'skipped_expired', 'attached'].includes(String(raw.attachmentStatus))) &&
       (raw.stagedAnswer === undefined || isRichContent(raw.stagedAnswer)) &&
+      (raw.skippedAt === undefined || typeof raw.skippedAt === 'number' && Number.isFinite(raw.skippedAt)) &&
+      (raw.expiresAt === undefined || typeof raw.expiresAt === 'number' && Number.isFinite(raw.expiresAt)) &&
       (raw.capturedAt === undefined || isNonEmptyString(raw.capturedAt) && Number.isFinite(Date.parse(raw.capturedAt))) &&
       (raw.candidateAnswerFingerprint === undefined || isNonEmptyString(raw.candidateAnswerFingerprint)) &&
       (raw.attachedAt === undefined || isNonEmptyString(raw.attachedAt) && Number.isFinite(Date.parse(raw.attachedAt))) &&

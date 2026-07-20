@@ -2,7 +2,7 @@
 
 PointAsk is a Chrome extension for asking focused follow-up questions about text selected in a ChatGPT answer. The question composer lets the user choose the current conversation or a shared follow-up Workspace; its explicit “发送” click creates and submits exactly one pending prompt to that destination. Answer attachment remains a separate user action.
 
-PointAsk requires no API key and no backend. Its intended application data is stored locally with `chrome.storage.local`. In a shared follow-up Workspace, clicking “继续追问” temporarily saves the current completed answer locally so it can still be attached if ChatGPT later unloads the older DOM; the temporary copy is removed after that round is successfully attached.
+PointAsk requires no API key and no backend. Its intended application data is stored locally with `chrome.storage.local`. In a shared follow-up Workspace, clicking “继续追问” temporarily saves the current completed answer locally so it can still be attached if ChatGPT later unloads the older DOM. A successfully attached copy is removed immediately; an answer skipped during partial attachment may remain locally for up to 30 days so the user can explicitly attach it later, then expires automatically.
 
 ## Development
 
@@ -54,4 +54,4 @@ PointAsk never sends or stages an answer on page load, restoration, timers, or b
 
 ## Privacy
 
-The product is designed to process only user-selected source text, its paragraph context, the user's local question, the generated prompt, answers explicitly staged by clicking “继续追问” or explicitly selected for attachment, and relevant ChatGPT page URLs. Staged answers remain only in `chrome.storage.local` until attached or cleared. PointAsk does not process cookies, passwords, tokens, general browsing history, or background-collected answers, and it does not send data to an external server. See [docs/privacy-boundaries.md](docs/privacy-boundaries.md).
+The product is designed to process only user-selected source text, its paragraph context, the user's local question, the generated prompt, answers explicitly staged by clicking “继续追问”, retained after an explicit partial-attachment action, or explicitly selected for attachment, and relevant ChatGPT page URLs. Staged answers remain only in `chrome.storage.local` until attached, expired, their PointAsk thread is deleted, or all PointAsk data is cleared. Answers skipped during partial attachment are retained for at most 30 days and are never included in later default attachment. PointAsk does not process cookies, passwords, tokens, general browsing history, or background-collected answers, and it does not send data to an external server. See [docs/privacy-boundaries.md](docs/privacy-boundaries.md).

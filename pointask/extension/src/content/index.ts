@@ -33,6 +33,7 @@ if (adapter.isSupportedPage()) {
   const storageDriver = new ChromeStorageDriver();
   const migrationReady = runStorageMigration(storageDriver);
   const threadStore = new ThreadStore(storageDriver);
+  void migrationReady.then(() => threadStore.cleanupExpiredStagedAnswers()).catch(() => undefined);
   const pendingStore = new PendingStore(storageDriver);
   const settingsStore = new SettingsStore(storageDriver);
   const metrics = new MetricsStore(storageDriver);
@@ -42,7 +43,7 @@ if (adapter.isSupportedPage()) {
   const threads = new InlineThreadManager(
     pendingThreads, clipboard, webBridge, undefined, undefined, threadStore, pendingStore, metrics, workspaceStore, adapter, operationAuthorizer,
   );
-  const banner = new PendingBannerManager(webBridge, clipboard, adapter, operationAuthorizer, workspaceStore);
+  const banner = new PendingBannerManager(webBridge, clipboard, adapter, operationAuthorizer, workspaceStore, threadStore);
   banner.setReturnToThreadHandler((id) => threads.reveal(id));
   const attachment = new AnswerAttachmentMount(webBridge, operationAuthorizer);
   const answerNavigation = new AnswerNavigationManager(adapter, webBridge);

@@ -7,11 +7,15 @@ export class SettingsStore {
   async get(): Promise<PointAskSettings> {
     const raw = await this.driver.get([STORAGE_KEYS.settings, STORAGE_KEYS.schemaVersion]);
     const schema = migrateStorage(raw);
-    if (!raw[STORAGE_KEYS.settings]) await this.set(schema.settings);
+    if (!raw[STORAGE_KEYS.settings]) await this.driver.set({
+      [STORAGE_KEYS.settings]: schema.settings,
+      [STORAGE_KEYS.schemaVersion]: STORAGE_SCHEMA_VERSION,
+    });
     return schema.settings;
   }
   async set(settings: PointAskSettings): Promise<void> {
-    const current = await this.get();
+    const raw = await this.driver.get([STORAGE_KEYS.settings, STORAGE_KEYS.schemaVersion]);
+    const current = migrateStorage(raw).settings;
     const validated = migrateStorage({ [STORAGE_KEYS.settings]: { ...settings, displayIdCounters: settings.displayIdCounters ?? current.displayIdCounters } }).settings;
     await this.driver.set({ [STORAGE_KEYS.settings]: validated, [STORAGE_KEYS.schemaVersion]: STORAGE_SCHEMA_VERSION });
   }

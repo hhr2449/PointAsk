@@ -53,6 +53,8 @@ export function migrateStorage(raw: Record<string, unknown>): PointAskStorageSch
       const stagedAnswer = normalizeRichBlocks(round.stagedAnswer);
       const persistenceStatus = ['not_captured', 'staged', 'attaching', 'attached', 'capture_failed'].includes(String(round.persistenceStatus))
         ? round.persistenceStatus : round.status === 'attached' ? 'attached' : 'not_captured';
+      const attachmentStatus = ['available', 'skipped_retained', 'skipped_expired', 'attached'].includes(String(round.attachmentStatus))
+        ? round.attachmentStatus : persistenceStatus === 'attached' || round.status === 'attached' ? 'attached' : 'available';
       const answerMessage = messages.find((message) => message && typeof message === 'object' && message.role === 'assistant' && message.roundId === round.id);
       const answerMessageId = typeof round.answerMessageId === 'string' ? round.answerMessageId
         : answerMessage && typeof answerMessage.id === 'string' ? answerMessage.id : undefined;
@@ -61,7 +63,10 @@ export function migrateStorage(raw: Record<string, unknown>): PointAskStorageSch
         questionMessageId: typeof round.questionMessageId === 'string' ? round.questionMessageId : String(round.id ?? ''),
         ...(answerMessageId ? { answerMessageId } : {}),
         persistenceStatus,
-        ...(persistenceStatus === 'staged' && stagedAnswer ? { stagedAnswer } : { stagedAnswer: undefined }),
+        attachmentStatus,
+        ...(typeof round.skippedAt === 'number' ? { skippedAt: round.skippedAt } : {}),
+        ...(typeof round.expiresAt === 'number' ? { expiresAt: round.expiresAt } : {}),
+        ...(persistenceStatus === 'staged' && stagedAnswer && attachmentStatus !== 'skipped_expired' ? { stagedAnswer } : { stagedAnswer: undefined }),
       };
     });
     const roundByQuestion = new Map(rounds.map((round) => [String(round.questionMessageId), String((round as Record<string, unknown>).id)]));

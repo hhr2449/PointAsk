@@ -124,6 +124,7 @@ const dependencies: RuntimeDependencies = {
   navigationStore: new NavigationStore(storageDriver),
   threadReturnStore: new ThreadReturnStore(storageDriver),
 };
+void migrationReady.then(() => dependencies.threadStore?.cleanupExpiredStagedAnswers()).catch(() => undefined);
 
 async function persist(record: PendingAssociation, deps: RuntimeDependencies): Promise<void> {
   const { targetTabId: _transientTargetTabId, ...storedPendingThread } = record.pendingThread;
@@ -192,13 +193,12 @@ export async function handleRuntimeMessage(
   deps: RuntimeDependencies = dependencies,
 ): Promise<{ ok: boolean; data?: unknown; error?: string }> {
   if (!isPointAskRuntimeMessage(message)) return { ok: false, error: 'Invalid PointAsk runtime message' };
-  if (deps === dependencies) await migrationReady;
-  const senderTabId = sender.tab?.id;
-  if (senderTabId === undefined) return { ok: false, error: 'A visible sender tab is required' };
-  const settings = await deps.settingsStore?.get();
-  if (settings) deps.coordinator.setExpiryHours(settings.pendingExpiryHours);
-
   try {
+    if (deps === dependencies) await migrationReady;
+    const senderTabId = sender.tab?.id;
+    if (senderTabId === undefined) return { ok: false, error: 'A visible sender tab is required' };
+    const settings = await deps.settingsStore?.get();
+    if (settings) deps.coordinator.setExpiryHours(settings.pendingExpiryHours);
     switch (message.type) {
       case 'pointask:create-pending-thread': {
         const stored = await deps.threadStore?.get(message.pendingThread.threadId || message.pendingThread.id);
@@ -384,7 +384,8 @@ export async function handleRuntimeMessage(
         let existing = deps.coordinator.get(message.pendingThreadId);
         if (!existing) existing = await ensureTargetRecord(message.pendingThreadId, senderTabId, sender.tab?.url, deps);
         if (!existing) throw new Error('当前页面与该 PointAsk 线程的关联已失效，请重新关联');
-        const record = deps.coordinator.attachRounds(message.pendingThreadId, senderTabId, message.rounds, message.targetUrl);
+        const record = deps.coordinator.attachRounds(message.pendingThreadId, senderTabId, message.rounds, message.targetUrl,
+          message.skippedRoundIds);
         if (!record) throw new Error('所选轮次无法附加到当前线程');
         try { await persist(record, deps); }
         catch (error) { deps.coordinator.restoreSnapshot(existing); throw error; }
@@ -402,6 +403,15 @@ export async function handleRuntimeMessage(
         catch (error) { deps.coordinator.restoreSnapshot(existing); throw error; }
         await notify(record, deps.tabs);
         return { ok: true, data: record };
+      }
+      case 'pointask:delete-thread-data': {
+        const existing = deps.coordinator.findByThreadId(message.threadId);
+        const stored = await deps.threadStore?.get(message.threadId);
+        const sourceKey = existing?.localThread.sourceConversationKey ?? stored?.sourceConversationKey;
+        if (!sourceKey || !senderMatchesSource(sender.tab?.url, sourceKey)) throw new Error('Only the source page may delete a PointAsk thread');
+        deps.coordinator.deleteThread(message.threadId);
+        await Promise.all([deps.threadStore?.delete(message.threadId), deps.pendingStore?.deleteForThread(message.threadId)]);
+        return { ok: true };
       }
       case 'pointask:pending-thread-updated': {
         const existing = deps.coordinator.get(message.pendingThreadId);
@@ -554,8 +564,15 @@ export async function handleRuntimeMessage(
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  void handleRuntimeMessage(message, sender).then(sendResponse);
+  void handleRuntimeMessage(message, sender).then(sendResponse).catch((error: unknown) => {
+    console.error('[PointAsk background] phase=runtime_message', error);
+    sendResponse({ ok: false, error: error instanceof Error ? error.message : 'PointAsk background request failed' });
+  });
   return true;
 });
 
-chrome.tabs.onRemoved?.addListener((tabId) => { void handleTargetTabRemoved(tabId); });
+chrome.tabs.onRemoved?.addListener((tabId) => {
+  void handleTargetTabRemoved(tabId).catch((error: unknown) => {
+    console.error('[PointAsk background] phase=tab_removed', error);
+  });
+});

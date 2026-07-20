@@ -3,7 +3,7 @@ import { AnchorResolver, type AnchorMessageCandidate } from '../src/adapters/anc
 import type { SiteAdapter } from '../src/adapters/site-adapter';
 import { SpaLifecycleManager } from '../src/content/spa-lifecycle-manager';
 import type { LocalThread, TextAnchor } from '../src/shared/local-thread';
-import { clearAllPointAskData } from '../src/storage/settings-store';
+import { clearAllPointAskData, SettingsStore } from '../src/storage/settings-store';
 import { PendingStore } from '../src/storage/pending-store';
 import { DEFAULT_SETTINGS, STORAGE_KEYS, STORAGE_SCHEMA_VERSION } from '../src/storage/storage-schema';
 import { migrateStorage, runStorageMigration } from '../src/storage/migration';
@@ -28,6 +28,13 @@ const thread = (id = 'thread-one'): LocalThread => ({
 });
 
 describe('versioned local stores', () => {
+  it('initializes missing settings without recursive get/set when the schema version already exists', async () => {
+    const driver = new MemoryStorageDriver(); await driver.set({ [STORAGE_KEYS.schemaVersion]: STORAGE_SCHEMA_VERSION });
+    const settings = await new SettingsStore(driver).get();
+    expect(settings).toEqual(DEFAULT_SETTINGS);
+    expect(driver.data[STORAGE_KEYS.settings]).toEqual(DEFAULT_SETTINGS);
+  });
+
   it('silently retires storage work after the extension context is invalidated', async () => {
     const invalidated = new Error('Extension context invalidated.');
     const area = {

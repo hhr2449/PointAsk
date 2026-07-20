@@ -160,6 +160,7 @@ export const workspaceControlStyles = `${sharedShadowStyles}
   .pointask-control-low-frequency { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .pointask-continue-view textarea { width: 100%; min-height: 112px; resize: vertical; padding: 10px; border: 1px solid var(--pa-border); border-radius: 9px; color: inherit; background: var(--pa-bg-subtle); }
   .pointask-round-options { display: grid; gap: 8px; }
+  .pointask-round-group { display: grid; gap: 8px; }
   .pointask-round-option { display: flex; align-items: flex-start; gap: 9px; padding: 9px; border: 1px solid var(--pa-border); border-radius: 9px; }
   .pointask-round-option > span { display: grid; min-width: 0; gap: 3px; }
   .pointask-round-option small { margin-left: 7px; color: var(--pa-muted); font-weight: normal; }

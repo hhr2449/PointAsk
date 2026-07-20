@@ -12,12 +12,13 @@ export interface ContinueWorkspaceResult { ok: boolean; captureFailed?: boolean;
 
 export function WorkspaceControlCard({ record, records, rounds, state, expanded, busy, error, selectionSummary,
   onToggleExpanded, onSwitch, onPrimary, onReturn, onContinue, onAttachRounds, onClearSelection,
-  onAttachOnly, onUnlink, onCopyPrompt, debugInfo, otherActiveCount = 0 }: {
+  onAttachOnly, onUnlink, onCopyPrompt, onOpenRoundSelection, debugInfo, otherActiveCount = 0 }: {
   record: PendingAssociation; records: PendingAssociation[]; rounds: SelectableRound[]; state: WorkspaceControlDerivedState; expanded: boolean;
   busy: boolean; error?: string; selectionSummary?: string; onToggleExpanded(): void; onSwitch(id: string): void;
   onPrimary(): void; onReturn(): void; onContinue(question: string, skipCapture?: boolean): Promise<boolean | ContinueWorkspaceResult>;
   onAttachRounds(ids: string[]): Promise<boolean>;
   onClearSelection(): void; onAttachOnly(): void; onUnlink(): void; onCopyPrompt(): void; debugInfo?: string;
+  onOpenRoundSelection?(): Promise<void>;
   otherActiveCount?: number;
 }) {
   const [view, setView] = useState<View>('status');
@@ -42,7 +43,7 @@ export function WorkspaceControlCard({ record, records, rounds, state, expanded,
       // A round that became staged while this panel was open is selected by
       // default. Existing user choices are preserved; only newly eligible IDs
       // are added and newly invalid IDs are removed.
-      for (const round of rounds) if (round.persistenceStatus === 'staged' &&
+      for (const round of rounds) if ((round.attachmentStatus ?? 'available') === 'available' && round.persistenceStatus === 'staged' &&
         previousPersistence.current.get(round.id) !== 'staged' && isSelectableRound(round)) next.add(round.id);
       return next.size === current.size && [...next].every((id) => current.has(id)) ? current : next;
     });
@@ -80,11 +81,11 @@ export function WorkspaceControlCard({ record, records, rounds, state, expanded,
             .then((ok) => { if (ok) setView('status'); })} />
           : <WorkspaceStatusView source={record.pendingThread.anchor.selectedText} question={record.pendingThread.question} roundNumber={rounds.length} state={state}
             selectionSummary={selectionSummary} canChooseRounds={rounds.some((round) => !round.attached)} busy={busy} error={error} onPrimary={onPrimary}
-            onContinue={() => setView('continue')} onChooseRounds={() => {
+            onContinue={() => setView('continue')} onChooseRounds={() => { const open = () => {
               const defaults = defaultSelectedRoundIds(rounds);
               previousPersistence.current = new Map(rounds.map((round) => [round.id, round.persistenceStatus]));
               setSelected(defaults); setView('rounds');
-            }}
+            }; if (onOpenRoundSelection) void onOpenRoundSelection().then(open); else open(); }}
             onClearSelection={onClearSelection} onReturn={onReturn} onMore={() => setMenuOpen((open) => !open)} />}
       {menuOpen && <div className="pointask-control-menu" role="menu">
         <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); onAttachOnly(); }}>仅附加，不返回</button>

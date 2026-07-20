@@ -6,6 +6,7 @@ import type { PendingAssociation } from '../src/bridge/runtime-messages';
 import { WorkspaceControlCard } from '../src/components/workspace-control-card';
 import { deriveWorkspaceControlState } from '../src/components/workspace-control-state';
 import { defaultSelectedRoundIds, validSelectedRoundIds } from '../src/components/round-selection-state';
+import { RoundSelectionView } from '../src/components/round-selection-view';
 import { PendingThreadManager } from '../src/bridge/pending-thread-manager';
 import { PendingBannerManager } from '../src/content/pending-banner-manager';
 import { WebConversationBridge } from '../src/bridge/web-conversation-bridge';
@@ -186,6 +187,22 @@ describe('Workspace control visibility recovery', () => {
 });
 
 describe('Workspace control card', () => {
+  it('groups new, retained, and expired rounds while selecting only new rounds by default', async () => {
+    const container = document.createElement('div'); const root = createRoot(container);
+    const rounds = [
+      { id: 'new', index: 1, question: '新增', attached: false, latest: true, reliable: true, persistenceStatus: 'staged' as const, attachmentStatus: 'available' as const },
+      { id: 'old', index: 2, question: '跳过', attached: false, latest: false, reliable: true, persistenceStatus: 'staged' as const, attachmentStatus: 'skipped_retained' as const },
+      { id: 'expired', index: 3, question: '过期', attached: false, latest: false, reliable: false, persistenceStatus: 'not_captured' as const, attachmentStatus: 'skipped_expired' as const },
+    ];
+    await act(() => root.render(<RoundSelectionView rounds={rounds} selected={defaultSelectedRoundIds(rounds)} busy={false}
+      onToggle={vi.fn()} onCancel={vi.fn()} onAttach={vi.fn()} />));
+    expect(container.textContent).toContain('本次新增'); expect(container.textContent).toContain('之前跳过');
+    expect(container.textContent).toContain('暂存内容已过期');
+    const boxes = [...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
+    expect(boxes.map((box) => [box.checked, box.disabled])).toEqual([[true, false], [false, false], [false, true]]);
+    await act(() => root.unmount());
+  });
+
   it('expands/collapses with complementary semantics and renders only the state action', async () => {
     const container = document.createElement('div'); const root = createRoot(container); const toggle = vi.fn();
     const value = record('answer_ready'); const state = deriveWorkspaceControlState({ record: value, candidate, reliable: true, sending: false, selectionLength: 0, returnFailed: false });
@@ -291,8 +308,8 @@ describe('Workspace control card', () => {
       onClearSelection={vi.fn()} onAttachOnly={vi.fn()} onUnlink={vi.fn()} onCopyPrompt={vi.fn()} />));
     await act(() => [...container.querySelectorAll('button')].find((button) => button.textContent === '选择附加内容')!.click());
     const checkboxes = [...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
-    expect(checkboxes.map((checkbox) => [checkbox.disabled, checkbox.checked])).toEqual([[true, true], [false, true], [false, true]]);
-    await act(() => checkboxes[1]!.click());
+    expect(checkboxes.map((checkbox) => [checkbox.disabled, checkbox.checked])).toEqual([[false, true], [false, true], [true, true]]);
+    await act(() => checkboxes[0]!.click());
     await act(async () => {
       [...container.querySelectorAll('button')].find((button) => button.textContent === '附加所选并返回')!.click();
       await Promise.resolve();

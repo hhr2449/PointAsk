@@ -190,6 +190,7 @@ export class InlineThreadManager {
         id: roundId, questionMessageId: userMessage.id, pendingId: pending.id, promptHash: pending.promptHash ?? stableTextHash(generatedPrompt),
         assistantFingerprintsBefore: pending.assistantFingerprintsBefore ?? [], status: 'waiting_for_submission',
         persistenceStatus: 'not_captured',
+        attachmentStatus: 'available',
         createdAt: timestamp, updatedAt: timestamp,
       }],
       targetConversationUrl: answerMode === 'current_conversation' ? data.sourcePageUrl : workspace?.targetConversationUrl,
@@ -460,9 +461,11 @@ export class InlineThreadManager {
         updatedAt: this.now().toISOString(),
       }));
     }
+    const pendingId = this.pendingThreads.get(id)?.id ?? id;
     this.pendingThreads.delete(id);
-    const removePersisted = () => Promise.all([this.threadStore?.delete(id), this.pendingStore?.delete(id), this.metrics?.increment('threadsDeleted')]);
-    if (this.webBridge && item.thread.status !== 'draft') void this.webBridge.cancel(this.pendingThreads.get(id)?.id ?? id).then(removePersisted, removePersisted);
+    const removePersisted = () => Promise.all([this.threadStore?.delete(id), this.pendingStore?.deleteForThread(id),
+      this.webBridge?.deleteThreadData(id).catch(() => undefined), this.metrics?.increment('threadsDeleted')]);
+    if (this.webBridge && item.thread.status !== 'draft') void this.webBridge.cancel(pendingId).then(removePersisted, removePersisted);
     else void removePersisted();
     item.root.unmount();
     this.viewAnchors.get(id)?.stop(); this.viewAnchors.delete(id);
@@ -574,6 +577,7 @@ export class InlineThreadManager {
         id: roundId, questionMessageId: questionMessage.id, pendingId: pending.id,
         promptHash: pending.promptHash ?? stableTextHash(generatedPrompt), assistantFingerprintsBefore: pending.assistantFingerprintsBefore ?? [],
         status: 'waiting_for_submission', persistenceStatus: 'not_captured', createdAt: timestamp, updatedAt: timestamp,
+        attachmentStatus: 'available',
       }],
       status: 'waiting_for_submission',
       updatedAt: timestamp,
