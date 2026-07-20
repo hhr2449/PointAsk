@@ -522,13 +522,17 @@ describe('manual answer confirmation and storage', () => {
     vi.spyOn(adapter, 'submitComposer').mockReturnValue(true);
     vi.spyOn(adapter, 'hasSubmittedPrompt').mockReturnValue(true);
     const sent: Array<{ type: string; [key: string]: unknown }> = [];
+    let activeRoundIdWhenStaging: string | undefined;
     const sendMessage = vi.fn().mockImplementation((message: { type: string; [key: string]: unknown }) => {
       sent.push(message);
-      if (message.type === 'pointask:stage-round-answer') current = { ...current, localThread: { ...current.localThread,
-        rounds: current.localThread.rounds?.map((round) => round.id === firstRoundId ? { ...round, persistenceStatus: 'staged' as const,
-          stagedAnswer: [{ type: 'text' as const, content: '第一轮暂存回答' }], answerSource: {
-            conversationUrl: window.location.href, conversationKey: window.location.href, messageFingerprint: fingerprint,
-          } } : round) } };
+      if (message.type === 'pointask:stage-round-answer') {
+        activeRoundIdWhenStaging = current.pendingThread.roundId;
+        current = { ...current, localThread: { ...current.localThread,
+          rounds: current.localThread.rounds?.map((round) => round.id === firstRoundId ? { ...round, persistenceStatus: 'staged' as const,
+            stagedAnswer: [{ type: 'text' as const, content: '第一轮暂存回答' }], answerSource: {
+              conversationUrl: window.location.href, conversationKey: window.location.href, messageFingerprint: fingerprint,
+            } } : round) } };
+      }
       if (message.type === 'pointask:create-pending-thread') current = {
         ...current, pendingThread: message.pendingThread as PendingThread,
         localThread: message.localThread as PendingAssociation['localThread'], updatedAt: '2026-07-12T01:00:00.000Z',
@@ -549,6 +553,7 @@ describe('manual answer confirmation and storage', () => {
     expect(continued.ok).toBe(true);
     expect(sent.findIndex((message) => message.type === 'pointask:stage-round-answer'))
       .toBeLessThan(sent.findIndex((message) => message.type === 'pointask:create-pending-thread'));
+    expect(activeRoundIdWhenStaging).toBe(firstRoundId);
     const create = sent.find((message) => message.type === 'pointask:create-pending-thread')!;
     const nextPending = create.pendingThread as PendingThread;
     const nextThread = create.localThread as PendingAssociation['localThread'];
@@ -558,6 +563,58 @@ describe('manual answer confirmation and storage', () => {
     expect(nextThread.messages.map((message) => message.role)).toEqual(['user', 'user']);
     expect(nextThread.rounds).toHaveLength(2);
     expect(sent.some((message) => message.type === 'pointask:attach-answer' || message.type === 'pointask:attach-rounds')).toBe(false);
+    act(() => manager.stop());
+  });
+
+  it('stages and attaches the latest completed round when Attach all is clicked without another follow-up', async () => {
+    document.body.innerHTML = chatGptFixture;
+    const adapter = new ChatGptAdapter();
+    const answer = document.querySelector<HTMLElement>('[data-testid="conversation-turn-2"]')!;
+    const fingerprint = adapter.getMessageFingerprint(answer);
+    const base = association('workspace-latest-direct-attach').record;
+    const q1 = 'round-q1'; const q2 = 'round-q2';
+    const locator = { conversationUrl: window.location.href, conversationKey: window.location.href, messageFingerprint: 'answer-q1' };
+    let current: PendingAssociation = { ...base, targetConversationUrl: window.location.href,
+      pendingThread: { ...base.pendingThread, threadId: base.localThread.id, roundId: q2, answerMode: 'workspace', promptHash: 'hash-q2',
+        candidateAnswerFingerprint: fingerprint, status: 'answer_ready', targetConversationUrl: window.location.href },
+      localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready', targetConversationUrl: window.location.href,
+        messages: [
+          { id: q1, role: 'user', content: [{ type: 'text', content: '第一问' }], attachedManually: false, createdAt: base.createdAt },
+          { id: q2, role: 'user', content: [{ type: 'text', content: '第二问' }], attachedManually: false, createdAt: base.createdAt },
+        ], rounds: [
+          { id: q1, pendingId: 'older-pending', promptHash: 'hash-q1', assistantFingerprintsBefore: [], status: 'answer_ready',
+            persistenceStatus: 'staged', stagedAnswer: [{ type: 'text', content: '第一答' }], answerSource: locator,
+            createdAt: base.createdAt, updatedAt: base.updatedAt },
+          { id: q2, pendingId: base.pendingThread.id, promptHash: 'hash-q2', assistantFingerprintsBefore: [],
+            candidateAnswerFingerprint: fingerprint, status: 'answer_ready', persistenceStatus: 'not_captured',
+            createdAt: base.createdAt, updatedAt: base.updatedAt },
+        ] } };
+    vi.spyOn(adapter, 'findCandidateAnswer').mockImplementation((hash) => hash === 'hash-q2'
+      ? { element: answer, fingerprint, streaming: false } : null);
+    const extract = vi.spyOn(adapter, 'getMessageRichContent');
+    const sent: Array<{ type: string; rounds?: Array<{ roundId: string }> }> = [];
+    const sendMessage = vi.fn().mockImplementation((message: { type: string; rounds?: Array<{ roundId: string }> }) => {
+      sent.push(message);
+      if (message.type === 'pointask:stage-round-answer') current = { ...current, localThread: { ...current.localThread,
+        rounds: current.localThread.rounds?.map((round) => round.id === q2 ? { ...round, persistenceStatus: 'staged' as const,
+          stagedAnswer: [{ type: 'text' as const, content: '第二答' }], answerSource: {
+            conversationUrl: window.location.href, conversationKey: window.location.href, messageFingerprint: fingerprint,
+          } } : round) } };
+      if (message.type === 'pointask:attach-rounds') current = { ...current, localThread: { ...current.localThread,
+        rounds: current.localThread.rounds?.map((round) => message.rounds?.some((payload) => payload.roundId === round.id)
+          ? { ...round, status: 'attached' as const, persistenceStatus: 'attached' as const, stagedAnswer: undefined } : round) } };
+      return Promise.resolve({ ok: true, data: current });
+    });
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }),
+      new ClipboardManager(undefined, () => false), adapter);
+    await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
+    const internal = manager as unknown as { attachSelectedRounds(id: string): Promise<PendingAssociation | null> };
+    const outcome: { value: PendingAssociation | null } = { value: null };
+    await act(async () => { outcome.value = await internal.attachSelectedRounds(base.pendingThread.id); });
+    expect(sent.find((message) => message.type === 'pointask:stage-round-answer')).toBeTruthy();
+    expect(sent.find((message) => message.type === 'pointask:attach-rounds')?.rounds?.map((round) => round.roundId)).toEqual([q1, q2]);
+    expect(extract).toHaveBeenCalledTimes(1);
+    expect(outcome.value?.localThread.rounds?.every((round) => round.persistenceStatus === 'attached')).toBe(true);
     act(() => manager.stop());
   });
 
@@ -590,14 +647,39 @@ describe('manual answer confirmation and storage', () => {
     await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
     const internal = manager as unknown as {
       resolveWorkspaceRounds(record: PendingAssociation): Array<{ candidateReliable: boolean }>;
-      captureCurrentWorkspaceRound(record: PendingAssociation, round: unknown): Promise<{ ok: boolean }>;
+      ensureRoundStaged(threadId: string, roundId: string): Promise<{ ok: boolean }>;
     };
     const resolved = internal.resolveWorkspaceRounds(current)[0]!;
     expect(resolved.candidateReliable).toBe(true);
     let captured = { ok: false };
-    await act(async () => { captured = await internal.captureCurrentWorkspaceRound(current, resolved); });
+    await act(async () => { captured = await internal.ensureRoundStaged(current.localThread.id, roundId); });
     expect(captured.ok).toBe(true);
     expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'pointask:stage-round-answer', roundId }));
+    act(() => manager.stop());
+  });
+
+  it('reuses an already staged active round without extracting or persisting it again', async () => {
+    const adapter = new ChatGptAdapter(); const base = association('workspace-stage-idempotent').record;
+    const roundId = base.localThread.messages[0]!.id;
+    const current: PendingAssociation = { ...base, targetConversationUrl: window.location.href,
+      pendingThread: { ...base.pendingThread, threadId: base.localThread.id, roundId, answerMode: 'workspace', promptHash: 'staged-hash',
+        status: 'answer_ready', targetConversationUrl: window.location.href },
+      localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready', targetConversationUrl: window.location.href,
+        rounds: [{ id: roundId, pendingId: base.pendingThread.id, promptHash: 'staged-hash', assistantFingerprintsBefore: [],
+          status: 'answer_ready', persistenceStatus: 'staged', stagedAnswer: [{ type: 'text', content: '已暂存回答' }], answerSource: {
+            conversationUrl: window.location.href, conversationKey: window.location.href, messageFingerprint: 'staged-answer',
+          }, createdAt: base.createdAt, updatedAt: base.updatedAt }] } };
+    const extract = vi.spyOn(adapter, 'getMessageRichContent');
+    const sendMessage = vi.fn().mockResolvedValue({ ok: true, data: current });
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }),
+      new ClipboardManager(undefined, () => false), adapter);
+    await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
+    const internal = manager as unknown as { ensureRoundStaged(threadId: string, id: string): Promise<{ ok: boolean; code: string }> };
+    let result: { ok: boolean; code: string } = { ok: false, code: '' };
+    await act(async () => { result = await internal.ensureRoundStaged(current.localThread.id, roundId); });
+    expect(result).toMatchObject({ ok: true, code: 'already_staged' });
+    expect(extract).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'pointask:stage-round-answer' }));
     act(() => manager.stop());
   });
 

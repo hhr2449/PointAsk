@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { PendingAssociation } from '../bridge/runtime-messages';
 import { ContinueQuestionView } from './continue-question-view';
 import { RoundSelectionView, type SelectableRound } from './round-selection-view';
-import { defaultSelectedRoundIds, validSelectedRoundIds } from './round-selection-state';
+import { defaultSelectedRoundIds, isSelectableRound, validSelectedRoundIds } from './round-selection-state';
 import { WorkspaceControlHeader } from './workspace-control-header';
 import { WorkspaceStatusView } from './workspace-status-view';
 import type { WorkspaceControlDerivedState } from './workspace-control-state';
@@ -63,7 +63,7 @@ export function WorkspaceControlCard({ record, records, rounds, state, expanded,
         })} />
         : view === 'rounds' ? <RoundSelectionView rounds={rounds} selected={validSelected} busy={busy} error={error}
           onToggle={(id) => setSelected((current) => { const round = rounds.find((item) => item.id === id);
-            if (!round || round.attached || !round.reliable) return validSelectedRoundIds(rounds, current);
+            if (!round || !isSelectableRound(round)) return validSelectedRoundIds(rounds, current);
             const next = validSelectedRoundIds(rounds, current); if (next.has(id)) next.delete(id); else next.add(id); return next; })}
           onCancel={() => setView('status')} onAttach={() => void onAttachRounds([...validSelected])
             .then((ok) => { if (ok) setView('status'); })} />

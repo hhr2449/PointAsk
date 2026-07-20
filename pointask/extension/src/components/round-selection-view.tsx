@@ -1,14 +1,16 @@
+import { isSelectableRound } from './round-selection-state';
+
 export interface SelectableRound { id: string; index: number; question: string; attached: boolean; latest: boolean; reliable: boolean;
-  persistenceStatus?: 'not_captured' | 'staged' | 'attaching' | 'attached' | 'capture_failed'; }
+  stageable?: boolean; persistenceStatus?: 'not_captured' | 'staged' | 'attaching' | 'attached' | 'capture_failed'; }
 
 export function RoundSelectionView({ rounds, selected, busy, error, onToggle, onCancel, onAttach }: {
   rounds: SelectableRound[]; selected: Set<string>; busy: boolean; error?: string;
   onToggle(id: string): void; onCancel(): void; onAttach(): void;
 }) {
-  const validSelectedCount = rounds.filter((round) => !round.attached && round.reliable && (round.persistenceStatus ?? 'staged') === 'staged' && selected.has(round.id)).length;
+  const validSelectedCount = rounds.filter((round) => isSelectableRound(round) && selected.has(round.id)).length;
   return <div className="pointask-control-view"><h2>选择附加内容</h2><div className="pointask-round-options">
-    {rounds.map((round) => <label key={round.id} className={round.attached || !round.reliable ? 'pointask-round-option pointask-disabled' : 'pointask-round-option'}>
-      <input type="checkbox" disabled={round.attached || !round.reliable || busy} checked={round.attached || selected.has(round.id)} onChange={() => onToggle(round.id)} />
+    {rounds.map((round) => <label key={round.id} className={!isSelectableRound(round) ? 'pointask-round-option pointask-disabled' : 'pointask-round-option'}>
+      <input type="checkbox" disabled={!isSelectableRound(round) || busy} checked={round.attached || selected.has(round.id)} onChange={() => onToggle(round.id)} />
       <span><strong>第 {round.index} 轮</strong>{round.attached && <small>已附加</small>}{round.latest && <small>最新</small>}
         {!round.attached && <small>{round.persistenceStatus === 'staged' ? '已暂存' : round.persistenceStatus === 'capture_failed'
           ? '暂存失败' : '尚未暂存'}</small>}<span>{round.question}</span></span>

@@ -220,6 +220,31 @@ describe('Workspace control card', () => {
     await act(() => root.unmount());
   });
 
+  it('keeps the latest selected when it changes from stageable to staged', async () => {
+    const container = document.createElement('div'); const root = createRoot(container); const value = record('answer_ready');
+    const state = deriveWorkspaceControlState({ record: value, candidate, reliable: true, sending: false, selectionLength: 0,
+      returnFailed: false, attachableRoundCount: 1, stagedRoundCount: 0, totalRoundCount: 2, attachedRoundCount: 0 });
+    const onAttachRounds = vi.fn().mockResolvedValue(true);
+    const props = { record: value, records: [value], state, expanded: true, busy: false, onToggleExpanded: vi.fn(), onSwitch: vi.fn(),
+      onPrimary: vi.fn(), onReturn: vi.fn(), onContinue: vi.fn().mockResolvedValue(true), onAttachRounds, onClearSelection: vi.fn(),
+      onAttachOnly: vi.fn(), onUnlink: vi.fn(), onCopyPrompt: vi.fn() };
+    const before = [
+      { id: 'q1', index: 1, question: '第一问', attached: false, latest: false, reliable: false },
+      { id: 'q2', index: 2, question: '第二问', attached: false, latest: true, reliable: false, stageable: true,
+        persistenceStatus: 'not_captured' as const },
+    ];
+    await act(() => root.render(<WorkspaceControlCard {...props} rounds={before} />));
+    await act(() => [...container.querySelectorAll('button')].find((button) => button.textContent === '选择附加内容')!.click());
+    expect([...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')][1]?.checked).toBe(true);
+    const after = before.map((round) => round.id === 'q2' ? { ...round, reliable: true, stageable: false,
+      persistenceStatus: 'staged' as const } : round);
+    await act(() => root.render(<WorkspaceControlCard {...props} rounds={after} />));
+    await act(async () => { [...container.querySelectorAll('button')].find((button) => button.textContent === '附加所选并返回')!.click();
+      await Promise.resolve(); });
+    expect(onAttachRounds).toHaveBeenCalledWith(['q2']);
+    await act(() => root.unmount());
+  });
+
   it('retries only return after an attachment has already succeeded', async () => {
     const attached = record('answer_attached');
     const sendMessage = vi.fn().mockResolvedValue({ ok: false, error: '返回失败' });

@@ -20,6 +20,7 @@ export function deriveWorkspaceControlState(options: {
   selectionLength: number;
   returnFailed: boolean;
   attachableRoundCount?: number;
+  stagedRoundCount?: number;
   totalRoundCount?: number;
   attachedRoundCount?: number;
   canContinue?: boolean;
@@ -34,11 +35,12 @@ export function deriveWorkspaceControlState(options: {
   if (attachable > 0) {
     const primaryLabel = (options.totalRoundCount ?? 1) === 1 ? '附加本轮并返回'
       : (options.attachedRoundCount ?? 0) > 0 ? `附加新增 ${attachable} 轮并返回` : `附加全部 ${attachable} 轮并返回`;
-    return { status: 'attachable', label: `${attachable} 轮已暂存，可附加`, primary: 'attach_default_return', primaryLabel,
+    const label = (options.stagedRoundCount ?? attachable) === attachable ? `${attachable} 轮已暂存，可附加` : `${attachable} 轮回答可附加`;
+    return { status: 'attachable', label, primary: 'attach_default_return', primaryLabel,
       secondary: options.canContinue || candidate && reliable || record.localThread.status === 'answer_attached' ? 'continue' : undefined };
   }
-  if (options.canContinue) return { status: 'waiting', label: '回答已完成，继续追问时将暂存', secondary: 'continue' };
   if (candidate && !reliable) return { status: 'ambiguous', label: '回答匹配不明确' };
+  if (options.canContinue) return { status: 'waiting', label: '回答已完成，继续追问时将暂存', secondary: 'continue' };
   if (record.localThread.status === 'answer_attached') return { status: 'attached', label: '已附加', primary: 'return', secondary: 'continue' };
   if (record.pendingThread.submittedPromptHash === record.pendingThread.promptHash ||
     ['waiting_for_answer', 'generating'].includes(record.localThread.status)) return { status: 'waiting', label: '等待回答' };

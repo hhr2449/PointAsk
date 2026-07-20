@@ -42,6 +42,10 @@ interface ResolvedWorkspaceRound extends SelectableRound {
 
 type WorkspaceAttachPhase = 'validate' | 'extract' | 'persist' | 'navigate';
 interface RejectedWorkspaceRound { roundId: string; reason: string; }
+type WorkspaceStagingTrigger = 'continue' | 'attach_all' | 'attach_selected';
+type EnsureRoundStagedCode = 'staged' | 'already_staged' | 'already_attached' | 'answer_still_streaming' |
+  'answer_not_loaded' | 'answer_ambiguous' | 'capture_failed';
+interface EnsureRoundStagedResult { ok: boolean; code: EnsureRoundStagedCode; record?: PendingAssociation; error?: string; }
 
 function logWorkspaceAttach(details: { threadId: string; selectedRoundIds: string[]; validRoundIds: string[];
   rejectedRounds: RejectedWorkspaceRound[]; phase: WorkspaceAttachPhase; error?: unknown }): void {
@@ -49,6 +53,15 @@ function logWorkspaceAttach(details: { threadId: string; selectedRoundIds: strin
   const error = details.error instanceof Error ? details.error.message : details.error ? String(details.error) : undefined;
   console.debug(`[PointAsk attach]\nthreadId=${details.threadId}\nselectedRoundIds=${JSON.stringify(details.selectedRoundIds)}` +
     `\nvalidRoundIds=${JSON.stringify(details.validRoundIds)}\nrejectedRounds=${JSON.stringify(details.rejectedRounds)}` +
+    `\nphase=${details.phase}\nerror=${error ?? ''}`);
+}
+
+function logWorkspaceStaging(details: { threadId: string; roundId: string; activeRoundId?: string; trigger: WorkspaceStagingTrigger;
+  beforeStatus?: string; afterStatus?: string; phase: 'resolve' | 'extract' | 'persist' | 'attach'; error?: unknown }): void {
+  if (!import.meta.env.DEV) return;
+  const error = details.error instanceof Error ? details.error.message : details.error ? String(details.error) : undefined;
+  console.debug(`[PointAsk staging]\nthreadId=${details.threadId}\nroundId=${details.roundId}\nactiveRoundId=${details.activeRoundId ?? ''}` +
+    `\ntrigger=${details.trigger}\nbeforeStatus=${details.beforeStatus ?? ''}\nafterStatus=${details.afterStatus ?? ''}` +
     `\nphase=${details.phase}\nerror=${error ?? ''}`);
 }
 
@@ -79,6 +92,7 @@ export class PendingBannerManager {
   private workspaceExpanded = true;
   private workspaceSelection: SelectionData | null = null;
   private readonly returnFailedIds = new Set<string>();
+  private readonly stagingPromises = new Map<string, Promise<EnsureRoundStagedResult>>();
 
   constructor(
     private readonly bridge: WebConversationBridge,
@@ -218,7 +232,8 @@ export class PendingBannerManager {
     const activeCandidate = active ? this.candidates.get(active.pendingThread.id) : undefined;
     const activeReliable = Boolean(active && activeCandidate && this.isReliableCandidate(active.pendingThread.id, activeCandidate));
     const activeRounds = active ? this.resolveWorkspaceRounds(active) : [];
-    const attachableRounds = activeRounds.filter((round) => !round.attached && round.reliable);
+    const attachableRounds = activeRounds.filter((round) => !round.attached && (round.reliable || round.stageable));
+    const stagedRoundCount = activeRounds.filter((round) => !round.attached && round.reliable).length;
     const attachedRoundCount = activeRounds.filter((round) => round.attached).length;
     const activeSelection = active && activeCandidate && this.workspaceSelection?.messageFingerprint === activeCandidate.fingerprint
       ? this.workspaceSelection : null;
@@ -228,8 +243,8 @@ export class PendingBannerManager {
         state={deriveWorkspaceControlState({ record: active, candidate: activeCandidate, reliable: activeReliable,
           sending: this.sendingIds.has(active.pendingThread.id), selectionLength: activeSelection?.selectedText.length ?? 0,
           returnFailed: this.returnFailedIds.has(active.pendingThread.id), attachableRoundCount: attachableRounds.length,
-          totalRoundCount: activeRounds.length, attachedRoundCount,
-          canContinue: Boolean(activeRounds.at(-1) && (activeRounds.at(-1)!.candidateReliable ||
+          stagedRoundCount, totalRoundCount: activeRounds.length, attachedRoundCount,
+          canContinue: Boolean(activeRounds.at(-1) && (activeRounds.at(-1)!.status === 'answer_ready' ||
             ['staged', 'attached', 'capture_failed'].includes(activeRounds.at(-1)!.persistenceStatus))) })}
         busy={this.sendingIds.has(active.pendingThread.id) || this.attachingIds.has(active.pendingThread.id)}
         error={this.errors.get(active.pendingThread.id)} selectionSummary={activeSelection ? `${activeSelection.selectedText.length} 个字符：${activeSelection.selectedText.slice(0, 36)}${activeSelection.selectedText.length > 36 ? '…' : ''}` : undefined}
@@ -287,7 +302,7 @@ export class PendingBannerManager {
       record.pendingThread.submittedPromptHash !== record.pendingThread.promptHash && !this.candidates.has(id)) {
       await this.fill(id); return;
     }
-    if (this.resolveWorkspaceRounds(record).some((round) => !round.attached && round.reliable) || this.workspaceSelection) {
+    if (this.resolveWorkspaceRounds(record).some((round) => !round.attached && (round.reliable || round.stageable)) || this.workspaceSelection) {
       await this.attachWorkspaceAnswer(id, true); return;
     }
     if (record.localThread.status === 'answer_attached') await this.returnToSourceThread(id);
@@ -301,11 +316,11 @@ export class PendingBannerManager {
   }
 
   private async attachSelectedRounds(id: string, requestedRoundIds?: string[]): Promise<PendingAssociation | null> {
-    const record = this.records.get(id);
+    let record = this.records.get(id);
     if (!record || this.attachingIds.has(id)) return null;
-    const resolved = this.resolveWorkspaceRounds(record);
+    let resolved = this.resolveWorkspaceRounds(record);
     const selection = this.workspaceSelection;
-    const selectedRound = selection ? resolved.find((round) => round.candidate?.fingerprint === selection.messageFingerprint &&
+    let selectedRound = selection ? resolved.find((round) => round.candidate?.fingerprint === selection.messageFingerprint &&
       round.candidate.element === selection.sourceMessageElement) : undefined;
     if (selection && !selectedRound) {
       const rejected = [{ roundId: record.pendingThread.roundId ?? 'unknown', reason: '所选回答定位已失效' }];
@@ -313,29 +328,51 @@ export class PendingBannerManager {
       this.errors.set(id, '所选回答已变化，请重新选择回答内容'); this.render(); return null;
     }
     const selectedIds = selection && selectedRound ? [selectedRound.id] : requestedRoundIds
-      ? [...new Set(requestedRoundIds)] : resolved.filter((round) => !round.attached && round.reliable).map((round) => round.id);
+      ? [...new Set(requestedRoundIds)] : resolved.filter((round) => !round.attached && (round.reliable || round.stageable)).map((round) => round.id);
     const rejected: RejectedWorkspaceRound[] = [];
-    const chosen = selection && selectedRound ? [selectedRound] : selectedIds.flatMap((roundId) => {
-      const round = resolved.find((item) => item.id === roundId);
-      if (!round) { rejected.push({ roundId, reason: '轮次不存在' }); return []; }
-      if (round.attached) { rejected.push({ roundId, reason: '已经附加' }); return []; }
-      if (round.status !== 'answer_ready') { rejected.push({ roundId, reason: '回答尚未完成' }); return []; }
-      if (round.persistenceStatus !== 'staged') { rejected.push({ roundId, reason: '回答尚未暂存' }); return []; }
-      if (!round.stagedAnswer || !isRichContent(round.stagedAnswer)) { rejected.push({ roundId, reason: '暂存内容无效' }); return []; }
-      if (!round.question.trim() || round.question === '问题内容不可用') { rejected.push({ roundId, reason: '缺少问题内容' }); return []; }
-      if (!round.answerLocator?.messageFingerprint) { rejected.push({ roundId, reason: '缺少回答定位信息' }); return []; }
-      return [round];
-    });
-    logWorkspaceAttach({ threadId: record.localThread.id, selectedRoundIds: selectedIds,
-      validRoundIds: chosen.map((round) => round.id), rejectedRounds: rejected, phase: 'validate' });
-    if (!chosen.length) {
-      const detail = rejected.map((item) => `${item.roundId}：${item.reason}`).join('；');
-      this.errors.set(id, detail ? `没有可附加的所选轮次（${detail}）` : '没有可可靠附加的轮次，请先选择回答内容');
-      this.render(); return null;
-    }
+    if (!selectedIds.length) return null;
     if (this.authorizer && !(await this.authorizer.authorize())) return null;
     this.attachingIds.add(id); this.errors.delete(id); this.render();
     try {
+      if (!selection) {
+        const trigger: WorkspaceStagingTrigger = requestedRoundIds ? 'attach_selected' : 'attach_all';
+        for (const roundId of selectedIds) {
+          const round = resolved.find((item) => item.id === roundId);
+          if (!round || round.attached || round.persistenceStatus === 'staged') continue;
+          const staged = await this.ensureRoundStaged(record.localThread.id, roundId, trigger);
+          if (staged.record) record = staged.record;
+          if (!staged.ok) rejected.push({ roundId, reason: staged.error ?? staged.code });
+        }
+        if (trigger === 'attach_all' && rejected.length) {
+          const detail = rejected.map((item) => `${item.roundId}：${item.reason}`).join('；');
+          this.errors.set(id, `最新回答尚未暂存，未执行附加（${detail}）`); this.render(); return null;
+        }
+        record = this.records.get(id) ?? record;
+        resolved = this.resolveWorkspaceRounds(record);
+      }
+      selectedRound = selection ? resolved.find((round) => round.candidate?.fingerprint === selection.messageFingerprint &&
+        round.candidate.element === selection.sourceMessageElement) : undefined;
+      const chosen = selection && selectedRound ? [selectedRound] : selectedIds.flatMap((roundId) => {
+        const round = resolved.find((item) => item.id === roundId);
+        if (!round) { rejected.push({ roundId, reason: '轮次不存在' }); return []; }
+        if (round.attached) { rejected.push({ roundId, reason: '已经附加' }); return []; }
+        if (round.status !== 'answer_ready') { rejected.push({ roundId, reason: '回答尚未完成' }); return []; }
+        if (round.persistenceStatus !== 'staged') {
+          if (!rejected.some((item) => item.roundId === roundId)) rejected.push({ roundId, reason: '回答尚未暂存' });
+          return [];
+        }
+        if (!round.stagedAnswer || !isRichContent(round.stagedAnswer)) { rejected.push({ roundId, reason: '暂存内容无效' }); return []; }
+        if (!round.question.trim() || round.question === '问题内容不可用') { rejected.push({ roundId, reason: '缺少问题内容' }); return []; }
+        if (!round.answerLocator?.messageFingerprint) { rejected.push({ roundId, reason: '缺少回答定位信息' }); return []; }
+        return [round];
+      });
+      logWorkspaceAttach({ threadId: record.localThread.id, selectedRoundIds: selectedIds,
+        validRoundIds: chosen.map((round) => round.id), rejectedRounds: rejected, phase: 'validate' });
+      if (!chosen.length) {
+        const detail = rejected.map((item) => `${item.roundId}：${item.reason}`).join('；');
+        this.errors.set(id, detail ? `没有可附加的所选轮次（${detail}）` : '没有可可靠附加的轮次，请先选择回答内容');
+        this.render(); return null;
+      }
       const payloads: AttachedRoundPayload[] = [];
       for (const round of chosen) {
         let rich;
@@ -364,11 +401,14 @@ export class PendingBannerManager {
         .filter((round) => round.status === 'attached').map((round) => round.id));
       const missing = payloads.filter((payload) => !persisted.has(payload.roundId));
       if (missing.length) throw new Error(`保存后未确认轮次：${missing.map((payload) => payload.roundId).join(', ')}`);
+      for (const payload of payloads) logWorkspaceStaging({ threadId: record.localThread.id, roundId: payload.roundId,
+        activeRoundId: record.pendingThread.roundId, trigger: requestedRoundIds ? 'attach_selected' : 'attach_all',
+        beforeStatus: 'staged', afterStatus: 'attached', phase: 'attach' });
       this.records.set(id, updated); this.candidates.delete(id); this.workspaceSelection = null; this.errors.delete(id); this.render();
       return updated;
     } catch (error) {
       logWorkspaceAttach({ threadId: record.localThread.id, selectedRoundIds: selectedIds,
-        validRoundIds: chosen.map((round) => round.id), rejectedRounds: rejected,
+        validRoundIds: [], rejectedRounds: rejected,
         phase: error instanceof Error && /回答内容|读取回答/.test(error.message) ? 'extract' : 'persist', error });
       this.errors.set(id, error instanceof Error ? error.message : '保存附加内容失败，请重试'); this.render(); return null;
     } finally { this.attachingIds.delete(id); this.render(); }
@@ -406,12 +446,16 @@ export class PendingBannerManager {
         }
       } else {
         this.attachingIds.add(id); this.errors.delete(id); this.render();
-        let captured;
-        try { captured = await this.captureCurrentWorkspaceRound(record, currentRound); }
+        let staged: EnsureRoundStagedResult;
+        try { staged = await this.ensureRoundStaged(record.localThread.id, currentRoundId!, 'continue'); }
         finally { this.attachingIds.delete(id); this.render(); }
-        if (!captured.ok) return captured;
-        record = captured.record!;
+        if (!staged.ok) return { ok: false, captureFailed: true, error: staged.error ?? '当前回答暂存失败' };
+        record = staged.record ?? record;
       }
+    }
+    const confirmedActiveRoundId = record.pendingThread.roundId ?? threadRounds(record.localThread, record.pendingThread).at(-1)?.id;
+    if (confirmedActiveRoundId !== currentRoundId) {
+      const error = '当前轮次已变化，请重新提交继续追问'; this.errors.set(id, error); this.render(); return { ok: false, error };
     }
     const timestamp = new Date().toISOString();
     const roundId = `pointask-message-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -440,42 +484,78 @@ export class PendingBannerManager {
     } finally { this.sendingIds.delete(pendingId); this.render(); }
   }
 
-  private async captureCurrentWorkspaceRound(record: PendingAssociation, round: ResolvedWorkspaceRound): Promise<ContinueWorkspaceResult & { record?: PendingAssociation }> {
-    const id = record.pendingThread.id;
+  private ensureRoundStaged(threadId: string, roundId: string,
+    trigger: WorkspaceStagingTrigger = 'continue'): Promise<EnsureRoundStagedResult> {
+    const key = `${threadId}:${roundId}`;
+    const existing = this.stagingPromises.get(key);
+    if (existing) return existing;
+    const operation = this.performEnsureRoundStaged(threadId, roundId, trigger)
+      .finally(() => this.stagingPromises.delete(key));
+    this.stagingPromises.set(key, operation);
+    return operation;
+  }
+
+  private async performEnsureRoundStaged(threadId: string, roundId: string,
+    trigger: WorkspaceStagingTrigger): Promise<EnsureRoundStagedResult> {
+    const record = [...this.records.values()].find((item) => item.localThread.id === threadId);
+    const activeRoundId = record?.pendingThread.roundId ?? (record ? threadRounds(record.localThread, record.pendingThread).at(-1)?.id : undefined);
+    const round = record ? this.resolveWorkspaceRounds(record).find((item) => item.id === roundId) : undefined;
+    const beforeStatus = round?.persistenceStatus;
+    const log = (phase: 'resolve' | 'extract' | 'persist' | 'attach', afterStatus?: string, error?: unknown) =>
+      logWorkspaceStaging({ threadId, roundId, activeRoundId, trigger, beforeStatus, afterStatus, phase, error });
+    if (!record || !round || activeRoundId !== roundId || record.localThread.id !== (record.pendingThread.threadId || record.pendingThread.id)) {
+      log('resolve', beforeStatus, '轮次状态已变化');
+      return { ok: false, code: 'capture_failed', error: '当前回答暂存失败：轮次状态已变化' };
+    }
+    if (round.persistenceStatus === 'staged') {
+      log('resolve', 'staged'); return { ok: true, code: 'already_staged', record };
+    }
+    if (round.persistenceStatus === 'attached' || round.attached) {
+      log('resolve', 'attached'); return { ok: true, code: 'already_attached', record };
+    }
+    if (round.status === 'generating' || round.candidate?.streaming) {
+      log('resolve', beforeStatus, 'answer_still_streaming');
+      return { ok: false, code: 'answer_still_streaming', error: '当前回答仍在生成，请等待完成后重试' };
+    }
     const fallbackFingerprint = round.candidate?.fingerprint ?? round.knownAnswerFingerprint;
     const fallbackLocator = round.answerLocator ?? (fallbackFingerprint ? {
       conversationUrl: window.location.href, conversationKey: this.adapter?.getConversationKey() ?? window.location.href,
       messageFingerprint: fallbackFingerprint,
     } : undefined);
-    const fail = async (message: string): Promise<ContinueWorkspaceResult> => {
+    const fail = async (code: Exclude<EnsureRoundStagedCode, 'staged' | 'already_staged' | 'already_attached' | 'answer_still_streaming'>,
+      message: string, phase: 'resolve' | 'extract' | 'persist'): Promise<EnsureRoundStagedResult> => {
       try {
-        const updated = await this.bridge.stageRoundAnswer(id, round.id, record.pendingThread.promptHash ?? '', {
+        const updated = await this.bridge.stageRoundAnswer(record.pendingThread.id, round.id, record.pendingThread.promptHash ?? '', {
           captureFailed: true, answerSource: fallbackLocator, targetUrl: window.location.href,
         });
-        this.records.set(id, updated); this.render();
+        this.records.set(record.pendingThread.id, updated); this.render();
       } catch { /* Keep the user's draft even if persisting the failure marker also fails. */ }
-      this.errors.set(id, message); this.render();
-      return { ok: false, captureFailed: true, error: `当前回答暂存失败：${message}` };
+      log(phase, 'capture_failed', message);
+      this.errors.set(record.pendingThread.id, message); this.render();
+      return { ok: false, code, error: `当前回答暂存失败：${message}` };
     };
-    const activeRoundId = record.pendingThread.roundId ?? threadRounds(record.localThread, record.pendingThread).at(-1)?.id;
-    if (record.localThread.id !== (record.pendingThread.threadId || record.pendingThread.id) ||
-      round.id !== activeRoundId || round.status !== 'answer_ready') return fail('轮次状态已变化');
-    if (!record.targetConversationUrl || !isCompatibleChatGptTargetUrl(record.targetConversationUrl, window.location.href)) return fail('当前页面不是目标 Workspace');
-    if (!round.candidate) return fail(round.knownAnswerFingerprint || round.answerLocator
-      ? '回答当前未加载，请滚动加载后重试' : '无法唯一匹配当前回答');
-    if (!round.candidateReliable || round.candidate.streaming) return fail('当前回答仍在生成或匹配不唯一');
+    if (round.status !== 'answer_ready') return fail('capture_failed', '当前轮回答尚未完成', 'resolve');
+    if (!record.targetConversationUrl || !isCompatibleChatGptTargetUrl(record.targetConversationUrl, window.location.href)) {
+      return fail('capture_failed', '当前页面不是目标 Workspace', 'resolve');
+    }
+    if (!round.candidate) return round.knownAnswerFingerprint || round.answerLocator
+      ? fail('answer_not_loaded', '回答当前未加载，请滚动加载后重试', 'resolve')
+      : fail('answer_ambiguous', '无法唯一匹配当前回答', 'resolve');
+    if (!round.candidateReliable) return fail('answer_ambiguous', '当前回答匹配不唯一', 'resolve');
+    log('extract', beforeStatus);
     const rich = this.adapter?.getMessageRichContent(round.candidate.element);
-    if (!rich?.blocks.length || !isRichContent(rich.blocks)) return fail('回答内容为空或格式无效');
+    if (!rich?.blocks.length || !isRichContent(rich.blocks)) return fail('capture_failed', '回答内容为空或格式无效', 'extract');
     const answerSource = { conversationUrl: window.location.href,
       conversationKey: this.adapter?.getConversationKey() ?? window.location.href, messageFingerprint: round.candidate.fingerprint };
     try {
-      const updated = await this.bridge.stageRoundAnswer(id, round.id, record.pendingThread.promptHash ?? '', {
+      const updated = await this.bridge.stageRoundAnswer(record.pendingThread.id, round.id, record.pendingThread.promptHash ?? '', {
         captureFailed: false, richContent: rich.blocks, answerSource, targetUrl: window.location.href,
       });
-      this.records.set(id, updated); this.errors.delete(id); this.render();
-      return { ok: true, record: updated };
+      this.records.set(record.pendingThread.id, updated); this.errors.delete(record.pendingThread.id); this.render();
+      log('persist', 'staged');
+      return { ok: true, code: 'staged', record: updated };
     } catch (error) {
-      return fail(error instanceof Error ? error.message : '本地保存失败');
+      return fail('capture_failed', error instanceof Error ? error.message : '本地保存失败', 'persist');
     }
   }
 
@@ -483,6 +563,7 @@ export class PendingBannerManager {
     const questions = new Map(record.localThread.messages.filter((message) => message.role === 'user')
       .map((message) => [message.id, richPlainText(message.content)]));
     const rounds = threadRounds(record.localThread, record.pendingThread);
+    const activeRoundId = record.pendingThread.roundId ?? rounds.at(-1)?.id;
     return rounds.map((round, index) => {
       const attached = round.status === 'attached';
       const exactCandidate = !attached && this.adapter && ['answer_ready', 'generating'].includes(round.status)
@@ -502,8 +583,13 @@ export class PendingBannerManager {
         Boolean(round.candidateAnswerFingerprint && round.candidateAnswerFingerprint === candidate.fingerprint)));
       const stagedAnswer = round.persistenceStatus === 'staged' ? round.stagedAnswer : undefined;
       const reliable = Boolean(stagedAnswer && isRichContent(stagedAnswer) && round.answerSource?.messageFingerprint);
+      // A completed active round is actionable even before capture. The user
+      // click is what runs ensureRoundStaged and produces a precise
+      // not-loaded/ambiguous error when extraction cannot proceed.
+      const stageable = !attached && round.id === activeRoundId && round.status === 'answer_ready' && !reliable &&
+        (!candidate || candidateReliable);
       return { id: round.id, index: index + 1, question: questions.get(round.id) ?? '问题内容不可用', attached,
-        latest: index === rounds.length - 1, reliable, candidate, candidateReliable, status: round.status,
+        latest: index === rounds.length - 1, reliable, stageable, candidate, candidateReliable, status: round.status,
         persistenceStatus: round.persistenceStatus, stagedAnswer, answerLocator: round.answerSource,
         knownAnswerFingerprint: round.candidateAnswerFingerprint };
     });
