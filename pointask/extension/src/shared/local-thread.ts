@@ -112,8 +112,28 @@ export interface LocalMessage {
   role: 'user' | 'assistant';
   content: RichContentBlock[];
   answerSource?: AnswerSourceLocator;
+  roundId?: string;
+  attachedAt?: string;
   attachedManually: boolean;
   createdAt: string;
+}
+
+export type RoundPersistenceStatus = 'not_captured' | 'staged' | 'attaching' | 'attached' | 'capture_failed';
+
+export interface LocalThreadRound {
+  id: string;
+  pendingId: string;
+  promptHash: string;
+  assistantFingerprintsBefore: string[];
+  candidateAnswerFingerprint?: string;
+  status: 'waiting_for_submission' | 'waiting_for_answer' | 'generating' | 'answer_ready' | 'failed' | 'attached';
+  persistenceStatus: RoundPersistenceStatus;
+  stagedAnswer?: RichContentBlock[];
+  capturedAt?: string;
+  attachedAt?: string;
+  answerSource?: AnswerSourceLocator;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface LocalThread {
@@ -129,6 +149,7 @@ export interface LocalThread {
   sourceMessageFingerprint: string;
   targetConversationUrl?: string;
   messages: LocalMessage[];
+  rounds?: LocalThreadRound[];
   status: ThreadStatus;
   createdAt: string;
   updatedAt: string;

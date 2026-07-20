@@ -79,6 +79,7 @@ export const threadStyles = `${sharedShadowStyles}
   .pointask-round-answer { padding-left: 12px; border-left: 2px solid color-mix(in srgb, var(--pa-accent) 72%, var(--pa-border)); }
   .pointask-round-answer-label { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; color: var(--pa-text); font-size: 15px; line-height: 1.35; font-weight: 600; }
   .pointask-round-answer-label::before { content: "◦"; color: var(--pa-muted); font-size: 14px; line-height: 1; }
+  .pointask-round-meta { margin: -2px 0 6px; color: var(--pa-muted); font-size: 11px; overflow-wrap: anywhere; }
   .pointask-round-answer-content { color: var(--pa-text); font-size: 16px; line-height: 1.65; }
   .pointask-round-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .pointask-round-secondary { border-color: var(--pa-border); padding: 6px 9px; color: var(--pa-muted); background: transparent; }

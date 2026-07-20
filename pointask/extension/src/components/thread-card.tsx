@@ -183,6 +183,7 @@ export function ThreadCard(props: ThreadCardProps) {
               </div>
               <div className="pointask-round-answer">
                 <div className="pointask-round-answer-label">回答</div>
+                <div className="pointask-round-meta">roundId: {round.id}{answer?.attachedAt && <> · 附加于 {new Date(answer.attachedAt).toLocaleString()}</>}</div>
                 <div className="pointask-round-answer-content">
                   {answer ? <RichContentRenderer blocks={answer.content} /> : <span>{waitingAnswer ? '回答正在生成中……' : waitingSubmission ? '问题已准备好，等待发送。' : '回答尚未生成。'}</span>}
                 </div>

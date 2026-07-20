@@ -2,7 +2,7 @@
 
 PointAsk is a Chrome extension for asking focused follow-up questions about text selected in a ChatGPT answer. The question composer lets the user choose the current conversation or a shared follow-up Workspace; its explicit “发送” click creates and submits exactly one pending prompt to that destination. Answer attachment remains a separate user action.
 
-PointAsk requires no API key and no backend. Its intended application data is stored locally with `chrome.storage.local`.
+PointAsk requires no API key and no backend. Its intended application data is stored locally with `chrome.storage.local`. In a shared follow-up Workspace, clicking “继续追问” temporarily saves the current completed answer locally so it can still be attached if ChatGPT later unloads the older DOM; the temporary copy is removed after that round is successfully attached.
 
 ## Development
 
@@ -18,6 +18,7 @@ npm run build
 ```
 
 `npm run dev` rebuilds the extension when source files change. Production output is written to `extension/dist/`.
+The automated suite includes Workspace staging, restart restoration, staged attachment cleanup, return failure, and PointAsk-owned data clearing boundaries.
 
 To load the unpacked extension:
 
@@ -35,7 +36,7 @@ Threads and Workspaces survive page refreshes and tab replacement. Conversation 
 
 ## User-control boundary
 
-PointAsk never sends on page load, restoration, timers, or background activity. The explicitly labelled send button is the confirmation for exactly one pending prompt; prompt hashes and thread IDs prevent refreshes or repeated clicks from submitting it twice. It never calls a model API, uses a private ChatGPT endpoint, reads authentication data, or attaches an answer without a distinct user click.
+PointAsk never sends or stages an answer on page load, restoration, timers, or background activity. The explicitly labelled send button is the confirmation for exactly one pending prompt. Clicking “继续追问” is the explicit action that stages the current Workspace answer locally before sending the next round; it does not attach that answer to the source card. Prompt hashes, thread IDs, and round IDs prevent repeated work. PointAsk never calls a model API, uses a private ChatGPT endpoint, reads authentication data, or attaches an answer without a distinct user click.
 
 ## Structure
 
@@ -53,4 +54,4 @@ PointAsk never sends on page load, restoration, timers, or background activity. 
 
 ## Privacy
 
-The product is designed to process only user-selected source text, its paragraph context, the user's local question, the generated prompt, a user-selected attached answer, and relevant ChatGPT page URLs. It does not process cookies, passwords, tokens, general browsing history, unselected page content, or automatically collected answers, and it does not send data to an external server. See [docs/privacy-boundaries.md](docs/privacy-boundaries.md).
+The product is designed to process only user-selected source text, its paragraph context, the user's local question, the generated prompt, answers explicitly staged by clicking “继续追问” or explicitly selected for attachment, and relevant ChatGPT page URLs. Staged answers remain only in `chrome.storage.local` until attached or cleared. PointAsk does not process cookies, passwords, tokens, general browsing history, or background-collected answers, and it does not send data to an external server. See [docs/privacy-boundaries.md](docs/privacy-boundaries.md).

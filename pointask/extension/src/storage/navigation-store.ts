@@ -13,6 +13,7 @@ export interface PendingThreadReturn {
   id: string;
   threadId: string;
   sourceConversationUrl: string;
+  roundId?: string;
   createdAt: string;
 }
 
@@ -40,6 +41,7 @@ export class ThreadReturnStore {
     const item = value as Partial<PendingThreadReturn>;
     const valid = typeof item.id === 'string' && typeof item.threadId === 'string' &&
       typeof item.sourceConversationUrl === 'string' && typeof item.createdAt === 'string'
+      && (item.roundId === undefined || typeof item.roundId === 'string')
       ? item as PendingThreadReturn : null;
     if (valid && Date.now() - Date.parse(valid.createdAt) <= 10 * 60 * 1_000) return valid;
     if (valid) await this.driver.remove(STORAGE_KEYS.pendingThreadReturn);

@@ -44,6 +44,16 @@ describe('runtime validation', () => {
     expect(isPointAskRuntimeMessage({
       type: 'pointask:open-or-auto-send-workspace', pendingThreadId: 'id', promptHash: 'hash', attemptId: 'attempt',
     })).toBe(true);
+    const attachment = { roundId: 'round-1', richContent: [{ type: 'text', content: '回答' }], answerSource: {
+      conversationUrl: 'https://chatgpt.com/c/workspace', conversationKey: 'https://chatgpt.com/c/workspace', messageFingerprint: 'answer-1',
+    } };
+    expect(isPointAskRuntimeMessage({ type: 'pointask:attach-rounds', pendingThreadId: 'id', rounds: [attachment],
+      targetUrl: 'https://chatgpt.com/c/workspace' })).toBe(true);
+    expect(isPointAskRuntimeMessage({ type: 'pointask:stage-round-answer', pendingThreadId: 'id', roundId: 'round-1', promptHash: 'hash',
+      targetUrl: 'https://chatgpt.com/c/workspace', captureFailed: false, richContent: attachment.richContent,
+      answerSource: attachment.answerSource })).toBe(true);
+    expect(isPointAskRuntimeMessage({ type: 'pointask:attach-rounds', pendingThreadId: 'id', rounds: [{ ...attachment, roundId: '' }],
+      targetUrl: 'https://chatgpt.com/c/workspace' })).toBe(false);
     expect(isPointAskRuntimeMessage({
       type: 'pointask:associate-target-page', pendingThreadId: 'id', targetUrl: 'https://example.com/',
     })).toBe(false);
@@ -313,6 +323,81 @@ describe('service worker routing', () => {
     const result = await handleRuntimeMessage({ type: 'pointask:get-page-pending-threads', currentUrl: 'https://chatgpt.com/c/target' },
       { tab: { id: 22, url: 'https://chatgpt.com/c/target' } }, { coordinator, tabs, threadStore, pendingStore });
     expect(result).toEqual({ ok: true, data: [] });
+  });
+
+  it('restores a continued Workspace round by pendingId after a service-worker restart', async () => {
+    const driver = new MemoryStorageDriver(); const threadStore = new ThreadStore(driver); const pendingStore = new PendingStore(driver);
+    const stableThreadId = 'workspace-stable-thread'; const nextPendingId = 'workspace-round-two';
+    const seed = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
+    const first = seed.create({ ...pending(stableThreadId), answerMode: 'workspace' }, 1);
+    const nextPending = { ...pending(nextPendingId), threadId: stableThreadId, roundId: 'round-2', answerMode: 'workspace' as const,
+      promptHash: 'round-two-hash', status: 'answer_ready' as const, targetConversationUrl: 'https://chatgpt.com/c/workspace' };
+    const localThread = { ...first.localThread, id: stableThreadId, answerMode: 'workspace' as const,
+      targetConversationUrl: 'https://chatgpt.com/c/workspace', status: 'answer_ready' as const,
+      messages: [{ id: 'round-2', role: 'user' as const, content: [{ type: 'text' as const, content: '第二轮问题' }],
+        attachedManually: false, createdAt: nextPending.createdAt }],
+      rounds: [{ id: 'round-2', pendingId: nextPendingId, promptHash: 'round-two-hash', assistantFingerprintsBefore: [],
+        status: 'answer_ready' as const, persistenceStatus: 'not_captured' as const,
+        createdAt: nextPending.createdAt, updatedAt: nextPending.updatedAt }] };
+    await threadStore.upsert(localThread); await pendingStore.replaceForThread(nextPending);
+    const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T02:00:00.000Z'));
+    const result = await handleRuntimeMessage({ type: 'pointask:get-page-pending-threads', currentUrl: 'https://chatgpt.com/c/workspace' },
+      { tab: { id: 22, url: 'https://chatgpt.com/c/workspace' } },
+      { coordinator, tabs: { create: vi.fn(), update: vi.fn(), sendMessage: vi.fn() }, threadStore, pendingStore });
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject([{ pendingThread: { id: nextPendingId, threadId: stableThreadId }, targetTabId: 22 }]);
+  });
+
+  it('persists a staged answer and restores it after a service-worker restart', async () => {
+    const driver = new MemoryStorageDriver(); const threadStore = new ThreadStore(driver); const pendingStore = new PendingStore(driver);
+    const value = { ...pending('workspace-staged-restart'), threadId: 'workspace-staged-restart', roundId: 'q1', answerMode: 'workspace' as const,
+      promptHash: 'stage-restart-hash', status: 'answer_ready' as const, targetConversationUrl: 'https://chatgpt.com/c/workspace' };
+    const seed = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
+    const initial = seed.create(value, 1);
+    seed.create(value, 1, { ...initial.localThread, status: 'answer_ready', messages: [{ id: 'q1', role: 'user',
+      content: [{ type: 'text', content: '问题' }], attachedManually: false, createdAt: value.createdAt }], rounds: [{ id: 'q1',
+      pendingId: value.id, promptHash: 'stage-restart-hash', assistantFingerprintsBefore: [], status: 'answer_ready',
+      persistenceStatus: 'not_captured', createdAt: value.createdAt, updatedAt: value.updatedAt }] });
+    seed.markTargetOpened(value.id, 22, 'https://chatgpt.com/c/workspace');
+    const staged = await handleRuntimeMessage({ type: 'pointask:stage-round-answer', pendingThreadId: value.id, roundId: 'q1',
+      promptHash: 'stage-restart-hash', targetUrl: 'https://chatgpt.com/c/workspace', captureFailed: false,
+      richContent: [{ type: 'text', content: '重启后仍存在的暂存回答' }], answerSource: {
+        conversationUrl: 'https://chatgpt.com/c/workspace', conversationKey: 'https://chatgpt.com/c/workspace', messageFingerprint: 'answer-q1',
+      } }, { tab: { id: 22, url: 'https://chatgpt.com/c/workspace' } },
+    { coordinator: seed, tabs: { create: vi.fn(), update: vi.fn(), sendMessage: vi.fn().mockResolvedValue({}) }, threadStore, pendingStore });
+    expect(staged.ok).toBe(true);
+    const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T02:00:00.000Z'));
+    const restored = await handleRuntimeMessage({ type: 'pointask:get-page-pending-threads', currentUrl: 'https://chatgpt.com/c/workspace' },
+      { tab: { id: 33, url: 'https://chatgpt.com/c/workspace' } },
+      { coordinator, tabs: { create: vi.fn(), update: vi.fn(), sendMessage: vi.fn() }, threadStore, pendingStore });
+    expect(restored.data).toMatchObject([{ localThread: { rounds: [{ persistenceStatus: 'staged',
+      stagedAnswer: [{ type: 'text', content: '重启后仍存在的暂存回答' }] }] } }]);
+  });
+
+  it('keeps staged content when the atomic attachment write fails', async () => {
+    const driver = new MemoryStorageDriver(); const threadStore = new ThreadStore(driver); const pendingStore = new PendingStore(driver);
+    const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
+    const value = { ...pending('workspace-attach-storage-failure'), threadId: 'workspace-attach-storage-failure', roundId: 'q1',
+      answerMode: 'workspace' as const, promptHash: 'staged-hash', status: 'answer_ready' as const,
+      targetConversationUrl: 'https://chatgpt.com/c/workspace' };
+    const initial = coordinator.create(value, 1); const locator = { conversationUrl: 'https://chatgpt.com/c/workspace',
+      conversationKey: 'https://chatgpt.com/c/workspace', messageFingerprint: 'answer-q1' };
+    const localThread = { ...initial.localThread, status: 'answer_ready' as const, targetConversationUrl: 'https://chatgpt.com/c/workspace',
+      messages: [{ id: 'q1', role: 'user' as const, content: [{ type: 'text' as const, content: '问题' }], attachedManually: false, createdAt: value.createdAt }],
+      rounds: [{ id: 'q1', pendingId: value.id, promptHash: 'staged-hash', assistantFingerprintsBefore: [], status: 'answer_ready' as const,
+        persistenceStatus: 'staged' as const, stagedAnswer: [{ type: 'text' as const, content: '必须保留的暂存回答' }], answerSource: locator,
+        createdAt: value.createdAt, updatedAt: value.updatedAt }] };
+    coordinator.create(value, 1, localThread); coordinator.markTargetOpened(value.id, 22, 'https://chatgpt.com/c/workspace');
+    await threadStore.upsertAssociation(localThread, value);
+    vi.spyOn(driver, 'set').mockRejectedValueOnce(new Error('quota failure'));
+    const result = await handleRuntimeMessage({ type: 'pointask:attach-rounds', pendingThreadId: value.id, targetUrl: 'https://chatgpt.com/c/workspace',
+      rounds: [{ roundId: 'q1', richContent: [{ type: 'text', content: '必须保留的暂存回答' }], answerSource: locator }] },
+    { tab: { id: 22, url: 'https://chatgpt.com/c/workspace' } },
+    { coordinator, tabs: { create: vi.fn(), update: vi.fn(), sendMessage: vi.fn() }, threadStore, pendingStore });
+    expect(result.ok).toBe(false);
+    expect(coordinator.get(value.id)?.localThread.rounds?.[0]).toMatchObject({ persistenceStatus: 'staged',
+      stagedAnswer: [{ type: 'text', content: '必须保留的暂存回答' }] });
+    expect((await threadStore.get(value.threadId))?.rounds?.[0]?.persistenceStatus).toBe('staged');
   });
 
   it('routes manual association, return-to-source, cancellation, and rejects invalid messages', async () => {

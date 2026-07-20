@@ -1,7 +1,8 @@
 import type { PendingThread } from '../bridge/pending-thread-manager';
-import { isCompatibleChatGptTargetUrl, type PendingAssociation } from '../bridge/runtime-messages';
+import { isCompatibleChatGptTargetUrl, type AttachedRoundPayload, type PendingAssociation } from '../bridge/runtime-messages';
 import type { AnswerSourceLocator, LocalMessage, LocalThread, RichContentBlock } from '../shared/local-thread';
-import { textBlocks } from '../shared/rich-content';
+import { richPlainText, textBlocks } from '../shared/rich-content';
+import { answerForRound, insertRoundAnswer, pendingStatus, syncPendingRound, threadRounds } from '../shared/thread-rounds';
 
 export const PENDING_EXPIRY_MS = 24 * 60 * 60 * 1_000;
 
@@ -52,6 +53,8 @@ export class PendingAssociationCoordinator {
     return record;
   }
 
+  restoreSnapshot(record: PendingAssociation): void { this.records.set(record.pendingThread.id, record); }
+
   markTargetOpened(id: string, targetTabId: number, targetUrl: string): PendingAssociation | null {
     const record = this.get(id);
     if (!record) return null;
@@ -59,13 +62,13 @@ export class PendingAssociationCoordinator {
       ? record.localThread.status : 'waiting_for_submission';
     return this.update(id, {
       pendingThread: { ...record.pendingThread, targetConversationUrl: targetUrl, targetTabId, targetConversationKey: record.localThread.answerMode === 'current_conversation' ? record.localThread.sourceConversationKey : targetUrl, status: this.toPendingStatus(status) },
-      localThread: {
+      localThread: syncPendingRound({
         ...record.localThread,
         targetConversationUrl: targetUrl,
         dedicatedConversationUrl: record.localThread.answerMode === 'dedicated_branch' ? targetUrl : record.localThread.dedicatedConversationUrl,
         status,
         updatedAt: this.now().toISOString(),
-      },
+      }, { ...record.pendingThread, targetConversationUrl: targetUrl, targetTabId, status: this.toPendingStatus(status) }),
       targetTabId,
       targetConversationUrl: targetUrl,
       associationStatus: 'target_opened',
@@ -77,11 +80,11 @@ export class PendingAssociationCoordinator {
     if (!record || record.sourceTabId !== sourceTabId) return null;
     return this.update(id, {
       associationStatus: 'awaiting_manual_association',
-      localThread: {
+      localThread: syncPendingRound({
         ...record.localThread,
         status: record.localThread.status === 'answer_attached' ? 'answer_attached' : 'waiting_for_submission',
         updatedAt: this.now().toISOString(),
-      },
+      }, { ...record.pendingThread, status: 'waiting_for_submission', updatedAt: this.now().toISOString() }),
     });
   }
 
@@ -105,13 +108,13 @@ export class PendingAssociationCoordinator {
       ? record.localThread.status : 'waiting_for_submission';
     return this.update(id, {
       pendingThread: { ...record.pendingThread, targetConversationUrl: targetUrl, targetTabId, targetConversationKey: record.localThread.answerMode === 'current_conversation' ? record.localThread.sourceConversationKey : targetUrl, status: this.toPendingStatus(status) },
-      localThread: {
+      localThread: syncPendingRound({
         ...record.localThread,
         targetConversationUrl: targetUrl,
         dedicatedConversationUrl: record.localThread.answerMode === 'dedicated_branch' ? targetUrl : record.localThread.dedicatedConversationUrl,
         status,
         updatedAt: this.now().toISOString(),
-      },
+      }, { ...record.pendingThread, targetConversationUrl: targetUrl, targetTabId, status: this.toPendingStatus(status) }),
       targetTabId,
       targetConversationUrl: targetUrl,
       associationStatus: 'associated',
@@ -151,7 +154,7 @@ export class PendingAssociationCoordinator {
 
   updateLocalThread(pendingThread: PendingThread, localThread: LocalThread, sourceTabId: number, allowSourceRebind = false): PendingAssociation | null {
     const record = this.get(pendingThread.id);
-    if (!record || (!allowSourceRebind && record.sourceTabId !== sourceTabId) || localThread.id !== pendingThread.id) return null;
+    if (!record || (!allowSourceRebind && record.sourceTabId !== sourceTabId) || localThread.id !== (pendingThread.threadId || pendingThread.id)) return null;
     return this.update(pendingThread.id, { pendingThread, localThread, sourceTabId });
   }
 
@@ -170,12 +173,20 @@ export class PendingAssociationCoordinator {
       role: 'assistant',
       content: typeof selected === 'string' ? textBlocks(selected.trim()) : selected,
       answerSource,
+      roundId: record.pendingThread.roundId,
+      attachedAt: timestamp,
       attachedManually: true,
       createdAt: timestamp,
     };
     const messages = [...record.localThread.messages];
     if (existingAnswerIndex >= 0) messages[existingAnswerIndex] = answer;
     else messages.push(answer);
+    const roundId = record.pendingThread.roundId;
+    const rounds = threadRounds(record.localThread, record.pendingThread).map((round) => round.id === roundId ? {
+      ...round, status: 'attached' as const, persistenceStatus: 'attached' as const, stagedAnswer: undefined,
+      attachedAt: timestamp, answerSource,
+      candidateAnswerFingerprint: answerSource?.messageFingerprint, updatedAt: timestamp,
+    } : round);
     return this.update(id, {
       pendingThread: { ...record.pendingThread, targetConversationUrl: targetUrl, status: 'answer_attached', candidateAnswerFingerprint: answerSource?.messageFingerprint },
       localThread: {
@@ -183,12 +194,81 @@ export class PendingAssociationCoordinator {
         targetConversationUrl: targetUrl,
         dedicatedConversationUrl: record.localThread.answerMode === 'dedicated_branch' ? targetUrl : record.localThread.dedicatedConversationUrl,
         messages,
+        rounds,
         status: 'answer_attached',
         updatedAt: timestamp,
       },
       targetConversationUrl: targetUrl,
       associationStatus: 'associated',
     });
+  }
+
+  attachRounds(id: string, targetTabId: number, payloads: AttachedRoundPayload[], targetUrl: string): PendingAssociation | null {
+    const record = this.get(id);
+    if (!record || record.targetTabId !== targetTabId || record.associationStatus === 'cancelled') return null;
+    const timestamp = this.now().toISOString();
+    const unique = new Map(payloads.map((payload) => [payload.roundId, payload]));
+    let localThread: LocalThread = { ...record.localThread, rounds: threadRounds(record.localThread, record.pendingThread) };
+    for (const payload of unique.values()) {
+      const round = localThread.rounds?.find((item) => item.id === payload.roundId);
+      if (!round) return null;
+      if (round.persistenceStatus === 'attached' || answerForRound(localThread, payload.roundId)) continue;
+      const question = localThread.messages.find((message) => message.role === 'user' && message.id === payload.roundId);
+      const stagedMatches = round.persistenceStatus === 'staged' && round.stagedAnswer &&
+        JSON.stringify(round.stagedAnswer) === JSON.stringify(payload.richContent);
+      const explicitSelection = Boolean(payload.answerSource.selectedText);
+      if (round.status !== 'answer_ready' || !question || !richPlainText(question.content).trim() || !payload.richContent.length ||
+        (!stagedMatches && !explicitSelection)) return null;
+    }
+    let attached = 0;
+    for (const payload of unique.values()) {
+      const round = localThread.rounds?.find((item) => item.id === payload.roundId);
+      if (!round || round.persistenceStatus === 'attached') continue;
+      const answer: LocalMessage = {
+        id: `pointask-answer-${payload.roundId}`, roundId: payload.roundId, role: 'assistant', content: payload.richContent,
+        answerSource: payload.answerSource, attachedManually: true, attachedAt: timestamp, createdAt: timestamp,
+      };
+      localThread = insertRoundAnswer(localThread, payload.roundId, answer);
+      localThread.rounds = localThread.rounds?.map((item) => item.id === payload.roundId ? {
+        ...item, status: 'attached' as const, persistenceStatus: 'attached' as const, stagedAnswer: undefined,
+        attachedAt: timestamp, answerSource: payload.answerSource,
+        candidateAnswerFingerprint: payload.answerSource.messageFingerprint, updatedAt: timestamp,
+      } : item);
+      attached++;
+    }
+    const currentRoundId = record.pendingThread.roundId ?? localThread.rounds?.at(-1)?.id;
+    const currentAttached = Boolean(currentRoundId && localThread.rounds?.find((round) => round.id === currentRoundId)?.status === 'attached');
+    if (!attached) return record;
+    return this.update(id, {
+      pendingThread: { ...record.pendingThread, targetConversationUrl: targetUrl,
+        status: currentAttached ? 'answer_attached' : record.pendingThread.status, updatedAt: timestamp },
+      localThread: { ...localThread, targetConversationUrl: targetUrl,
+        status: currentAttached ? 'answer_attached' : record.localThread.status, updatedAt: timestamp },
+      targetConversationUrl: targetUrl, associationStatus: 'associated',
+    });
+  }
+
+  stageRoundAnswer(id: string, targetTabId: number, roundId: string, promptHash: string, targetUrl: string,
+    captureFailed: boolean, richContent?: RichContentBlock[], answerSource?: AnswerSourceLocator): PendingAssociation | null {
+    const record = this.get(id);
+    if (!record || record.targetTabId !== targetTabId || record.associationStatus === 'cancelled' ||
+      record.pendingThread.id !== id || record.pendingThread.roundId !== roundId || record.pendingThread.promptHash !== promptHash ||
+      !record.targetConversationUrl || !isCompatibleChatGptTargetUrl(record.targetConversationUrl, targetUrl)) return null;
+    const rounds = threadRounds(record.localThread, record.pendingThread);
+    const current = rounds.find((round) => round.id === roundId);
+    if (!current || current.pendingId !== id || current.promptHash !== promptHash || current.persistenceStatus === 'attached') return null;
+    if (current.persistenceStatus === 'staged' && !captureFailed) return record;
+    const timestamp = this.now().toISOString();
+    if (!captureFailed && (current.status !== 'answer_ready' || !richContent?.length || !answerSource)) return null;
+    const updatedRound = captureFailed ? {
+      ...current, persistenceStatus: 'capture_failed' as const, stagedAnswer: undefined, updatedAt: timestamp,
+      ...(answerSource ? { answerSource, candidateAnswerFingerprint: answerSource.messageFingerprint } : {}),
+    } : {
+      ...current, persistenceStatus: 'staged' as const, stagedAnswer: richContent, answerSource,
+      candidateAnswerFingerprint: answerSource!.messageFingerprint, capturedAt: timestamp, updatedAt: timestamp,
+    };
+    return this.update(id, { localThread: { ...record.localThread,
+      rounds: rounds.map((round) => round.id === roundId ? updatedRound : round), updatedAt: timestamp } });
   }
 
   undoAttachment(id: string, senderTabId: number): PendingAssociation | null {
@@ -206,7 +286,8 @@ export class PendingAssociationCoordinator {
     const status = streaming ? 'generating' : 'answer_ready';
     return this.update(id, {
       pendingThread: { ...record.pendingThread, candidateAnswerFingerprint: fingerprint, status, updatedAt: this.now().toISOString() },
-      localThread: { ...record.localThread, status, updatedAt: this.now().toISOString() },
+      localThread: syncPendingRound({ ...record.localThread, status, updatedAt: this.now().toISOString() },
+        { ...record.pendingThread, candidateAnswerFingerprint: fingerprint, status, updatedAt: this.now().toISOString() }, pendingStatus(status)),
     });
   }
 
@@ -221,7 +302,8 @@ export class PendingAssociationCoordinator {
     const timestamp = this.now().toISOString();
     return this.update(id, {
       pendingThread: { ...record.pendingThread, submittedPromptHash: promptHash, submittedAt: timestamp, status: 'waiting_for_answer', updatedAt: timestamp },
-      localThread: { ...record.localThread, status: 'waiting_for_answer', updatedAt: timestamp },
+      localThread: syncPendingRound({ ...record.localThread, status: 'waiting_for_answer', updatedAt: timestamp },
+        { ...record.pendingThread, submittedPromptHash: promptHash, submittedAt: timestamp, status: 'waiting_for_answer', updatedAt: timestamp }),
       associationStatus: 'associated',
     });
   }
@@ -245,13 +327,14 @@ export class PendingAssociationCoordinator {
     const timestamp = this.now().toISOString();
     return this.update(id, {
       pendingThread: { ...record.pendingThread, status: 'failed', updatedAt: timestamp },
-      localThread: { ...record.localThread, status: 'failed', updatedAt: timestamp },
+      localThread: syncPendingRound({ ...record.localThread, status: 'failed', updatedAt: timestamp },
+        { ...record.pendingThread, status: 'failed', updatedAt: timestamp }),
     });
   }
 
   completeReturn(id: string, targetTabId: number): PendingAssociation | null {
     const record = this.get(id);
-    if (!record || record.targetTabId !== targetTabId || record.localThread.status !== 'answer_attached') return null;
+    if (!record || record.targetTabId !== targetTabId || !threadRounds(record.localThread, record.pendingThread).some((round) => round.status === 'attached')) return null;
     return this.update(id, { associationStatus: 'completed' });
   }
 
@@ -345,6 +428,12 @@ export class PendingAssociationCoordinator {
         attachedManually: false,
         createdAt: timestamp,
       }],
+      rounds: pendingThread.roundId ? [{
+        id: pendingThread.roundId, pendingId: pendingThread.id, promptHash: pendingThread.promptHash || `pointask-prompt-${pendingThread.id}`,
+        assistantFingerprintsBefore: pendingThread.assistantFingerprintsBefore ?? [], status: pendingStatus(pendingThread.status),
+        persistenceStatus: 'not_captured',
+        createdAt: timestamp, updatedAt: timestamp,
+      }] : undefined,
       status: 'draft',
       createdAt: timestamp,
       updatedAt: timestamp,

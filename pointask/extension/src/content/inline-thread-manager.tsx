@@ -178,6 +178,12 @@ export class InlineThreadManager {
       sourceConversationKey: data.conversationKey,
       sourceMessageFingerprint: data.messageFingerprint,
       messages: [...previousLocalMessages, userMessage],
+      rounds: [{
+        id: userMessage.id, pendingId: pending.id, promptHash: pending.promptHash ?? stableTextHash(generatedPrompt),
+        assistantFingerprintsBefore: pending.assistantFingerprintsBefore ?? [], status: 'waiting_for_submission',
+        persistenceStatus: 'not_captured',
+        createdAt: timestamp, updatedAt: timestamp,
+      }],
       targetConversationUrl: answerMode === 'current_conversation' ? data.sourcePageUrl : workspace?.targetConversationUrl,
       status: 'prompt_ready',
       createdAt: timestamp,
@@ -689,12 +695,14 @@ export class InlineThreadManager {
 
   getThread(id: string): LocalThread | null { return this.mounted.get(id)?.thread ?? null; }
   getHost(id: string): HTMLElement | null { return this.mounted.get(id)?.host ?? null; }
-  reveal(id: string): boolean {
+  reveal(id: string, roundId?: string): boolean {
     const item = this.mounted.get(id);
     if (!item?.host.isConnected) return false;
     const timestamp = this.now().toISOString();
-    this.expandedIds.add(id); item.thread = { ...item.thread, expanded: true, updatedAt: timestamp };
-    void this.threadStore?.setExpanded(id, true, timestamp); this.render(id);
+    this.expandedIds.add(id);
+    const collapsed = new Set(item.thread.collapsedRoundIds ?? []); if (roundId) collapsed.delete(roundId);
+    item.thread = { ...item.thread, expanded: true, collapsedRoundIds: item.thread.collapsedRoundIds || roundId ? [...collapsed] : undefined, updatedAt: timestamp };
+    void this.threadStore?.upsert(item.thread); this.render(id);
     item.host.classList.add('pointask-thread-highlight');
     const previousTimer = this.highlightTimers.get(id); if (previousTimer) clearTimeout(previousTimer);
     this.highlightTimers.set(id, setTimeout(() => {

@@ -1,9 +1,9 @@
 import { createRoot, type Root } from 'react-dom/client';
 import type { ClipboardManager } from '../bridge/clipboard-manager';
-import type { PendingAssociation } from '../bridge/runtime-messages';
+import { isRichContent, type AttachedRoundPayload, type PendingAssociation } from '../bridge/runtime-messages';
 import type { WebConversationBridge } from '../bridge/web-conversation-bridge';
 import { PendingThreadBanner } from '../components/pending-thread-banner';
-import { WorkspaceControlCard } from '../components/workspace-control-card';
+import { WorkspaceControlCard, type ContinueWorkspaceResult } from '../components/workspace-control-card';
 import { deriveWorkspaceControlState } from '../components/workspace-control-state';
 import { CurrentAnswerActions } from '../components/current-answer-actions';
 import { bannerStyles, currentAnswerActionStyles, workspaceControlStyles } from './shadow-styles';
@@ -20,12 +20,36 @@ import type { SelectionData } from './selection-manager';
 import { buildPrompt } from '../bridge/prompt-builder';
 import { stableTextHash } from '../shared/text-utils';
 import { textBlocks } from '../shared/rich-content';
+import { threadRounds } from '../shared/thread-rounds';
+import type { SelectableRound } from '../components/round-selection-view';
 
 interface MountedAnswerAction {
   host: HTMLElement;
   root: Root;
   fingerprint: string;
   element: HTMLElement;
+}
+
+interface ResolvedWorkspaceRound extends SelectableRound {
+  candidate?: CandidateAnswer;
+  candidateReliable: boolean;
+  stagedAnswer?: AttachedRoundPayload['richContent'];
+  answerLocator?: AttachedRoundPayload['answerSource'];
+  knownAnswerFingerprint?: string;
+  status: 'waiting_for_submission' | 'waiting_for_answer' | 'generating' | 'answer_ready' | 'failed' | 'attached';
+  persistenceStatus: 'not_captured' | 'staged' | 'attaching' | 'attached' | 'capture_failed';
+}
+
+type WorkspaceAttachPhase = 'validate' | 'extract' | 'persist' | 'navigate';
+interface RejectedWorkspaceRound { roundId: string; reason: string; }
+
+function logWorkspaceAttach(details: { threadId: string; selectedRoundIds: string[]; validRoundIds: string[];
+  rejectedRounds: RejectedWorkspaceRound[]; phase: WorkspaceAttachPhase; error?: unknown }): void {
+  if (!import.meta.env.DEV) return;
+  const error = details.error instanceof Error ? details.error.message : details.error ? String(details.error) : undefined;
+  console.debug(`[PointAsk attach]\nthreadId=${details.threadId}\nselectedRoundIds=${JSON.stringify(details.selectedRoundIds)}` +
+    `\nvalidRoundIds=${JSON.stringify(details.validRoundIds)}\nrejectedRounds=${JSON.stringify(details.rejectedRounds)}` +
+    `\nphase=${details.phase}\nerror=${error ?? ''}`);
 }
 
 export class PendingBannerManager {
@@ -193,20 +217,26 @@ export class PendingBannerManager {
     this.host.classList.toggle('pointask-has-workspace-control', Boolean(active));
     const activeCandidate = active ? this.candidates.get(active.pendingThread.id) : undefined;
     const activeReliable = Boolean(active && activeCandidate && this.isReliableCandidate(active.pendingThread.id, activeCandidate));
+    const activeRounds = active ? this.resolveWorkspaceRounds(active) : [];
+    const attachableRounds = activeRounds.filter((round) => !round.attached && round.reliable);
+    const attachedRoundCount = activeRounds.filter((round) => round.attached).length;
     const activeSelection = active && activeCandidate && this.workspaceSelection?.messageFingerprint === activeCandidate.fingerprint
       ? this.workspaceSelection : null;
     this.root.render(
       <>
-      {active && <WorkspaceControlCard record={active} records={workspaceRecords.slice(0, 6)} expanded={this.workspaceExpanded}
+      {active && <WorkspaceControlCard record={active} records={workspaceRecords.slice(0, 6)} rounds={activeRounds} expanded={this.workspaceExpanded}
         state={deriveWorkspaceControlState({ record: active, candidate: activeCandidate, reliable: activeReliable,
           sending: this.sendingIds.has(active.pendingThread.id), selectionLength: activeSelection?.selectedText.length ?? 0,
-          returnFailed: this.returnFailedIds.has(active.pendingThread.id) })}
+          returnFailed: this.returnFailedIds.has(active.pendingThread.id), attachableRoundCount: attachableRounds.length,
+          totalRoundCount: activeRounds.length, attachedRoundCount,
+          canContinue: Boolean(activeRounds.at(-1) && (activeRounds.at(-1)!.candidateReliable ||
+            ['staged', 'attached', 'capture_failed'].includes(activeRounds.at(-1)!.persistenceStatus))) })}
         busy={this.sendingIds.has(active.pendingThread.id) || this.attachingIds.has(active.pendingThread.id)}
         error={this.errors.get(active.pendingThread.id)} selectionSummary={activeSelection ? `${activeSelection.selectedText.length} 个字符：${activeSelection.selectedText.slice(0, 36)}${activeSelection.selectedText.length > 36 ? '…' : ''}` : undefined}
         onToggleExpanded={() => { this.workspaceExpanded = !this.workspaceExpanded; this.render(); }}
         onSwitch={(id) => { this.activeWorkspacePendingId = id; this.workspaceSelection = null; this.render(); }}
-        onPrimary={() => void this.runWorkspacePrimary(active!.pendingThread.id)} onReturn={() => void this.returnToSource(active!.pendingThread.id)}
-        onContinue={(question) => this.continueWorkspaceThread(active!.pendingThread.id, question)}
+        onPrimary={() => void this.runWorkspacePrimary(active!.pendingThread.id)} onReturn={() => void this.returnToSourceThread(active!.pendingThread.id)}
+        onContinue={(question, skipCapture) => this.continueWorkspaceThread(active!.pendingThread.id, question, skipCapture)}
         onAttachRounds={(ids) => this.attachWorkspaceRounds(active!.pendingThread.id, ids)}
         onClearSelection={() => { window.getSelection()?.removeAllRanges(); this.workspaceSelection = null; this.render(); }}
         onAttachOnly={() => void this.attachWorkspaceAnswer(active!.pendingThread.id, false)}
@@ -223,7 +253,7 @@ export class PendingBannerManager {
         onCopy={(id) => void this.copy(id)}
         onFill={(id) => void this.fill(id)}
         onAssociate={(id, confirmed) => void this.associate(id, confirmed)}
-        onReturn={(id) => void this.returnToSource(id)}
+        onReturn={(id) => void this.returnToSourceThread(id)}
         onCancel={(id) => void this.cancel(id)}
         onClose={(id) => { this.closedIds.add(id); this.render(); }}
         onAttachWhole={(id) => void this.attachWhole(id)}
@@ -250,55 +280,138 @@ export class PendingBannerManager {
 
   private async runWorkspacePrimary(id: string): Promise<void> {
     const record = this.records.get(id); if (!record) return;
-    if (this.returnFailedIds.has(id) || record.localThread.status === 'answer_attached') {
-      await this.returnToSource(id); return;
+    if (this.returnFailedIds.has(id)) {
+      await this.returnToSourceThread(id); return;
     }
     if (record.localThread.status === 'failed' || record.pendingThread.status === 'failed' ||
       record.pendingThread.submittedPromptHash !== record.pendingThread.promptHash && !this.candidates.has(id)) {
       await this.fill(id); return;
     }
-    await this.attachWorkspaceAnswer(id, true);
+    if (this.resolveWorkspaceRounds(record).some((round) => !round.attached && round.reliable) || this.workspaceSelection) {
+      await this.attachWorkspaceAnswer(id, true); return;
+    }
+    if (record.localThread.status === 'answer_attached') await this.returnToSourceThread(id);
   }
 
-  private async attachWorkspaceAnswer(id: string, returnAfter: boolean): Promise<boolean> {
-    const record = this.records.get(id); const candidate = this.candidates.get(id);
-    if (!record || !candidate || candidate.streaming || this.attachingIds.has(id)) return false;
-    const selection = this.workspaceSelection?.messageFingerprint === candidate.fingerprint &&
-      this.workspaceSelection.sourceMessageElement === candidate.element ? this.workspaceSelection : null;
-    if (!selection && !this.isReliableCandidate(id, candidate)) {
-      this.errors.set(id, '回答匹配不明确，请先选择回答内容'); this.render(); return false;
+  private async attachWorkspaceAnswer(id: string, returnAfter: boolean, requestedRoundIds?: string[]): Promise<boolean> {
+    const attached = await this.attachSelectedRounds(id, requestedRoundIds);
+    if (!attached) return false;
+    if (returnAfter) await this.returnToSourceThread(id);
+    return true;
+  }
+
+  private async attachSelectedRounds(id: string, requestedRoundIds?: string[]): Promise<PendingAssociation | null> {
+    const record = this.records.get(id);
+    if (!record || this.attachingIds.has(id)) return null;
+    const resolved = this.resolveWorkspaceRounds(record);
+    const selection = this.workspaceSelection;
+    const selectedRound = selection ? resolved.find((round) => round.candidate?.fingerprint === selection.messageFingerprint &&
+      round.candidate.element === selection.sourceMessageElement) : undefined;
+    if (selection && !selectedRound) {
+      const rejected = [{ roundId: record.pendingThread.roundId ?? 'unknown', reason: '所选回答定位已失效' }];
+      logWorkspaceAttach({ threadId: record.localThread.id, selectedRoundIds: [], validRoundIds: [], rejectedRounds: rejected, phase: 'validate' });
+      this.errors.set(id, '所选回答已变化，请重新选择回答内容'); this.render(); return null;
     }
-    if (this.authorizer && !(await this.authorizer.authorize())) return false;
+    const selectedIds = selection && selectedRound ? [selectedRound.id] : requestedRoundIds
+      ? [...new Set(requestedRoundIds)] : resolved.filter((round) => !round.attached && round.reliable).map((round) => round.id);
+    const rejected: RejectedWorkspaceRound[] = [];
+    const chosen = selection && selectedRound ? [selectedRound] : selectedIds.flatMap((roundId) => {
+      const round = resolved.find((item) => item.id === roundId);
+      if (!round) { rejected.push({ roundId, reason: '轮次不存在' }); return []; }
+      if (round.attached) { rejected.push({ roundId, reason: '已经附加' }); return []; }
+      if (round.status !== 'answer_ready') { rejected.push({ roundId, reason: '回答尚未完成' }); return []; }
+      if (round.persistenceStatus !== 'staged') { rejected.push({ roundId, reason: '回答尚未暂存' }); return []; }
+      if (!round.stagedAnswer || !isRichContent(round.stagedAnswer)) { rejected.push({ roundId, reason: '暂存内容无效' }); return []; }
+      if (!round.question.trim() || round.question === '问题内容不可用') { rejected.push({ roundId, reason: '缺少问题内容' }); return []; }
+      if (!round.answerLocator?.messageFingerprint) { rejected.push({ roundId, reason: '缺少回答定位信息' }); return []; }
+      return [round];
+    });
+    logWorkspaceAttach({ threadId: record.localThread.id, selectedRoundIds: selectedIds,
+      validRoundIds: chosen.map((round) => round.id), rejectedRounds: rejected, phase: 'validate' });
+    if (!chosen.length) {
+      const detail = rejected.map((item) => `${item.roundId}：${item.reason}`).join('；');
+      this.errors.set(id, detail ? `没有可附加的所选轮次（${detail}）` : '没有可可靠附加的轮次，请先选择回答内容');
+      this.render(); return null;
+    }
+    if (this.authorizer && !(await this.authorizer.authorize())) return null;
     this.attachingIds.add(id); this.errors.delete(id); this.render();
     try {
-      const rich = selection?.richSelection ?? this.adapter?.getMessageRichContent(candidate.element);
-      if (!rich?.blocks.length) throw new Error('无法安全读取这条回答');
-      const updated = await this.bridge.attachAnswer(id, selection?.selectedText ?? richPlainText(rich.blocks), false,
-        window.location.href, rich.blocks, {
+      const payloads: AttachedRoundPayload[] = [];
+      for (const round of chosen) {
+        let rich;
+        try {
+          rich = selection && round.id === selectedRound?.id ? selection.richSelection : { blocks: round.stagedAnswer };
+        } catch {
+          throw new Error(`${round.id}：读取回答内容失败`);
+        }
+        const blocks = rich?.blocks;
+        if (!blocks?.length || !isRichContent(blocks)) {
+          const error = new Error(`${round.id}：回答内容为空或格式无效`);
+          throw error;
+        }
+        const locator = selection && round.id === selectedRound?.id ? {
           conversationUrl: window.location.href, conversationKey: this.adapter?.getConversationKey() ?? window.location.href,
-          messageFingerprint: candidate.fingerprint, selectedText: selection?.selectedText,
-          prefixText: selection?.textAnchor?.prefixText, suffixText: selection?.textAnchor?.suffixText,
-        });
-      this.records.set(id, updated); this.candidates.delete(id); this.workspaceSelection = null; this.render();
-      if (returnAfter) await this.returnToSource(id);
-      return true;
+          messageFingerprint: round.candidate!.fingerprint,
+          ...(selection && round.id === selectedRound?.id ? { selectedText: selection.selectedText,
+            prefixText: selection.textAnchor?.prefixText, suffixText: selection.textAnchor?.suffixText } : {}),
+        } : round.answerLocator!;
+        payloads.push({ roundId: round.id, richContent: blocks, answerSource: locator });
+      }
+      logWorkspaceAttach({ threadId: record.localThread.id, selectedRoundIds: selectedIds,
+        validRoundIds: payloads.map((payload) => payload.roundId), rejectedRounds: rejected, phase: 'persist' });
+      const updated = await this.bridge.attachRounds(id, payloads, window.location.href);
+      const persisted = new Set(threadRounds(updated.localThread, updated.pendingThread)
+        .filter((round) => round.status === 'attached').map((round) => round.id));
+      const missing = payloads.filter((payload) => !persisted.has(payload.roundId));
+      if (missing.length) throw new Error(`保存后未确认轮次：${missing.map((payload) => payload.roundId).join(', ')}`);
+      this.records.set(id, updated); this.candidates.delete(id); this.workspaceSelection = null; this.errors.delete(id); this.render();
+      return updated;
     } catch (error) {
-      this.errors.set(id, error instanceof Error ? error.message : '附加失败，请重试'); this.render(); return false;
+      logWorkspaceAttach({ threadId: record.localThread.id, selectedRoundIds: selectedIds,
+        validRoundIds: chosen.map((round) => round.id), rejectedRounds: rejected,
+        phase: error instanceof Error && /回答内容|读取回答/.test(error.message) ? 'extract' : 'persist', error });
+      this.errors.set(id, error instanceof Error ? error.message : '保存附加内容失败，请重试'); this.render(); return null;
     } finally { this.attachingIds.delete(id); this.render(); }
   }
 
   private async attachWorkspaceRounds(id: string, roundIds: string[]): Promise<boolean> {
     if (this.workspaceSelection) return this.attachWorkspaceAnswer(id, true);
-    const record = this.records.get(id); const latestRoundId = record?.localThread.messages.filter((message) => message.role === 'user').at(-1)?.id;
-    if (!latestRoundId || !roundIds.includes(latestRoundId)) return false;
-    return this.attachWorkspaceAnswer(id, true);
+    return this.attachWorkspaceAnswer(id, true, roundIds);
   }
 
-  private async continueWorkspaceThread(id: string, question: string): Promise<boolean> {
-    let record = this.records.get(id); if (!record || !question.trim()) return false;
-    if (record.localThread.status !== 'answer_attached') {
-      if (!await this.attachWorkspaceAnswer(id, false)) return false;
-      record = this.records.get(id); if (!record) return false;
+  private async continueWorkspaceThread(id: string, question: string, skipCapture = false): Promise<ContinueWorkspaceResult> {
+    if (this.sendingIds.has(id)) return { ok: false, error: '正在处理当前继续追问' };
+    this.sendingIds.add(id); this.render();
+    try { return await this.performContinueWorkspaceThread(id, question, skipCapture); }
+    finally { this.sendingIds.delete(id); this.render(); }
+  }
+
+  private async performContinueWorkspaceThread(id: string, question: string, skipCapture: boolean): Promise<ContinueWorkspaceResult> {
+    let record = this.records.get(id); if (!record || !question.trim()) return { ok: false };
+    const currentRoundId = record.pendingThread.roundId ?? threadRounds(record.localThread, record.pendingThread).at(-1)?.id;
+    const currentRound = this.resolveWorkspaceRounds(record).find((round) => round.id === currentRoundId);
+    if (!currentRound || currentRound.status !== 'answer_ready' && currentRound.persistenceStatus !== 'attached') {
+      const error = '当前轮回答尚未生成完成，无法继续追问'; this.errors.set(id, error); this.render(); return { ok: false, error };
+    }
+    if (currentRound.persistenceStatus !== 'staged' && currentRound.persistenceStatus !== 'attached') {
+      if (skipCapture) {
+        try {
+          record = await this.bridge.stageRoundAnswer(id, currentRound.id, record.pendingThread.promptHash ?? '', {
+            captureFailed: true, answerSource: currentRound.answerLocator, targetUrl: window.location.href,
+          });
+          this.records.set(id, record); this.render();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : '无法保存暂存状态';
+          return { ok: false, captureFailed: true, error: message };
+        }
+      } else {
+        this.attachingIds.add(id); this.errors.delete(id); this.render();
+        let captured;
+        try { captured = await this.captureCurrentWorkspaceRound(record, currentRound); }
+        finally { this.attachingIds.delete(id); this.render(); }
+        if (!captured.ok) return captured;
+        record = captured.record!;
+      }
     }
     const timestamp = new Date().toISOString();
     const roundId = `pointask-message-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -312,16 +425,82 @@ export class PendingBannerManager {
       createdAt: timestamp, updatedAt: timestamp };
     const localThread = { ...record.localThread, messages: [...record.localThread.messages, {
       id: roundId, role: 'user' as const, content: textBlocks(question.trim()), attachedManually: false, createdAt: timestamp,
+    }], rounds: [...threadRounds(record.localThread, record.pendingThread), {
+      id: roundId, pendingId, promptHash: stableTextHash(generatedPrompt), assistantFingerprintsBefore: this.adapter?.getAssistantMessageFingerprints() ?? [],
+      status: 'waiting_for_submission' as const, persistenceStatus: 'not_captured' as const, createdAt: timestamp, updatedAt: timestamp,
     }], status: 'waiting_for_submission' as const, updatedAt: timestamp };
     this.sendingIds.add(pendingId); this.errors.delete(id); this.render();
     try {
       const created = await this.bridge.savePendingThread(pending, localThread);
       this.records.delete(id); this.records.set(pendingId, created); this.activeWorkspacePendingId = pendingId;
       this.sendingIds.delete(pendingId); this.render();
-      return await this.fill(pendingId);
+      return { ok: await this.fill(pendingId) };
     } catch (error) {
-      this.errors.set(id, error instanceof Error ? error.message : '发送失败，请重试'); return false;
+      const message = error instanceof Error ? error.message : '发送失败，请重试'; this.errors.set(id, message); return { ok: false, error: message };
     } finally { this.sendingIds.delete(pendingId); this.render(); }
+  }
+
+  private async captureCurrentWorkspaceRound(record: PendingAssociation, round: ResolvedWorkspaceRound): Promise<ContinueWorkspaceResult & { record?: PendingAssociation }> {
+    const id = record.pendingThread.id;
+    const fallbackFingerprint = round.candidate?.fingerprint ?? round.knownAnswerFingerprint;
+    const fallbackLocator = round.answerLocator ?? (fallbackFingerprint ? {
+      conversationUrl: window.location.href, conversationKey: this.adapter?.getConversationKey() ?? window.location.href,
+      messageFingerprint: fallbackFingerprint,
+    } : undefined);
+    const fail = async (message: string): Promise<ContinueWorkspaceResult> => {
+      try {
+        const updated = await this.bridge.stageRoundAnswer(id, round.id, record.pendingThread.promptHash ?? '', {
+          captureFailed: true, answerSource: fallbackLocator, targetUrl: window.location.href,
+        });
+        this.records.set(id, updated); this.render();
+      } catch { /* Keep the user's draft even if persisting the failure marker also fails. */ }
+      this.errors.set(id, message); this.render();
+      return { ok: false, captureFailed: true, error: `当前回答暂存失败：${message}` };
+    };
+    if (record.localThread.id !== (record.pendingThread.threadId || record.pendingThread.id) ||
+      round.id !== record.pendingThread.roundId || round.status !== 'answer_ready') return fail('轮次状态已变化');
+    if (!record.targetConversationUrl || !isCompatibleChatGptTargetUrl(record.targetConversationUrl, window.location.href)) return fail('当前页面不是目标 Workspace');
+    if (!round.candidate) return fail(round.knownAnswerFingerprint || round.answerLocator
+      ? '回答当前未加载，请滚动加载后重试' : '无法唯一匹配当前回答');
+    if (!round.candidateReliable || round.candidate.streaming) return fail('当前回答仍在生成或匹配不唯一');
+    const rich = this.adapter?.getMessageRichContent(round.candidate.element);
+    if (!rich?.blocks.length || !isRichContent(rich.blocks)) return fail('回答内容为空或格式无效');
+    const answerSource = { conversationUrl: window.location.href,
+      conversationKey: this.adapter?.getConversationKey() ?? window.location.href, messageFingerprint: round.candidate.fingerprint };
+    try {
+      const updated = await this.bridge.stageRoundAnswer(id, round.id, record.pendingThread.promptHash ?? '', {
+        captureFailed: false, richContent: rich.blocks, answerSource, targetUrl: window.location.href,
+      });
+      this.records.set(id, updated); this.errors.delete(id); this.render();
+      return { ok: true, record: updated };
+    } catch (error) {
+      return fail(error instanceof Error ? error.message : '本地保存失败');
+    }
+  }
+
+  private resolveWorkspaceRounds(record: PendingAssociation): ResolvedWorkspaceRound[] {
+    const questions = new Map(record.localThread.messages.filter((message) => message.role === 'user')
+      .map((message) => [message.id, richPlainText(message.content)]));
+    const rounds = threadRounds(record.localThread, record.pendingThread);
+    return rounds.map((round, index) => {
+      const attached = round.status === 'attached';
+      const exactCandidate = !attached && this.adapter && ['answer_ready', 'generating'].includes(round.status)
+        ? this.adapter.findCandidateAnswer(round.promptHash, round.assistantFingerprintsBefore) ?? undefined : undefined;
+      const rememberedElement = !exactCandidate && round.candidateAnswerFingerprint
+        ? this.adapter?.findAssistantMessageByFingerprint(round.candidateAnswerFingerprint) : null;
+      const candidate = exactCandidate ?? (rememberedElement ? { element: rememberedElement, fingerprint: round.candidateAnswerFingerprint!,
+        streaming: this.adapter?.isMessageStreaming(rememberedElement) ?? false } : undefined);
+      const sharedWithOtherThread = Boolean(exactCandidate && [...this.candidates].some(([pendingId, other]) =>
+        pendingId !== record.pendingThread.id && other.fingerprint === exactCandidate.fingerprint));
+      const candidateReliable = Boolean(exactCandidate && !exactCandidate.streaming && !sharedWithOtherThread && (!round.candidateAnswerFingerprint ||
+        round.candidateAnswerFingerprint === exactCandidate.fingerprint));
+      const stagedAnswer = round.persistenceStatus === 'staged' ? round.stagedAnswer : undefined;
+      const reliable = Boolean(stagedAnswer && isRichContent(stagedAnswer) && round.answerSource?.messageFingerprint);
+      return { id: round.id, index: index + 1, question: questions.get(round.id) ?? '问题内容不可用', attached,
+        latest: index === rounds.length - 1, reliable, candidate, candidateReliable, status: round.status,
+        persistenceStatus: round.persistenceStatus, stagedAnswer, answerLocator: round.answerSource,
+        knownAnswerFingerprint: round.candidateAnswerFingerprint };
+    });
   }
 
   private async unlink(id: string): Promise<void> {
@@ -505,14 +684,14 @@ export class PendingBannerManager {
   private async finishCurrentAttachment(id: string, updated: PendingAssociation): Promise<void> {
     this.records.set(id, updated); this.partialSelectionId = this.partialSelectionId === id ? null : this.partialSelectionId;
     this.candidates.delete(id); this.reliableCandidateIds.delete(id); this.removeAnswerAction(id);
-    await this.returnToSource(id);
+    await this.returnToSourceThread(id);
     this.records.delete(id); this.clearCurrentUi(id); this.render();
   }
 
   private async returnCurrentOnly(id: string): Promise<void> {
     if (this.partialSelectionId === id) this.partialSelectionId = null;
     this.returnedIds.add(id); this.removeAnswerAction(id);
-    await this.returnToSource(id);
+    await this.returnToSourceThread(id);
     this.render();
   }
 
@@ -544,7 +723,7 @@ export class PendingBannerManager {
       showAttachmentUndo(this.bridge, updated, (restored) => { this.records.set(id, restored); this.render(); });
       this.candidates.delete(id);
       this.render();
-      if (returnAfter) await this.returnToSource(id);
+      if (returnAfter) await this.returnToSourceThread(id);
     } catch (error) {
       this.errors.set(id, error instanceof Error ? error.message : '附加失败');
       this.render();
@@ -565,11 +744,11 @@ export class PendingBannerManager {
     catch (error) { this.errors.set(id, error instanceof Error ? error.message : '撤销失败'); this.render(); }
   }
 
-  private async returnToSource(id: string): Promise<void> {
-    const record = this.records.get(id); if (!record) return;
+  private async returnToSourceThread(id: string): Promise<boolean> {
+    const record = this.records.get(id); if (!record) return false;
     if (record.localThread.answerMode === 'current_conversation') {
       if (record.localThread.status === 'answer_attached') await this.bridge.returnToSource(id);
-      if (this.returnToThreadHandler?.(id)) return;
+      if (this.returnToThreadHandler?.(id)) return true;
       const resolution = this.adapter?.resolveTextAnchor(record.pendingThread.anchor, true);
       if (resolution?.status === 'resolved' && resolution.element) {
         if (record.pendingThread.viewAnchor) {
@@ -578,16 +757,26 @@ export class PendingBannerManager {
           resolution.element.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
         }
       }
-      return;
+      return true;
     }
     try {
+      logWorkspaceAttach({ threadId: record.localThread.id, selectedRoundIds: [], validRoundIds: [], rejectedRounds: [], phase: 'navigate' });
       await this.bridge.returnToSource(id);
       this.returnFailedIds.delete(id);
+      this.errors.delete(id);
       showOperationToast('已返回原文');
+      return true;
     } catch (error) {
-      if (record.localThread.status === 'answer_attached') this.returnFailedIds.add(id);
-      this.errors.set(id, error instanceof Error ? error.message : '返回原文失败，请重试');
+      const hasAttachedRound = threadRounds(record.localThread, record.pendingThread).some((round) => round.status === 'attached');
+      logWorkspaceAttach({ threadId: record.localThread.id, selectedRoundIds: [], validRoundIds: [], rejectedRounds: [], phase: 'navigate', error });
+      if (hasAttachedRound) {
+        this.returnFailedIds.add(id);
+        this.errors.set(id, '内容已附加，但未能返回原页面');
+      } else {
+        this.errors.set(id, error instanceof Error ? error.message : '返回原文失败，请重试');
+      }
       this.render();
+      return false;
     }
   }
 

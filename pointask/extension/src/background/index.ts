@@ -7,6 +7,7 @@ import { SettingsStore } from '../storage/settings-store';
 import { WorkspaceStore } from '../storage/workspace-store';
 import { runStorageMigration } from '../storage/migration';
 import { NavigationStore, ThreadReturnStore } from '../storage/navigation-store';
+import { threadRounds } from '../shared/thread-rounds';
 
 interface TabGateway {
   create(options: { url: string; active: boolean }): Promise<{ id?: number; url?: string; pendingUrl?: string; status?: string }>;
@@ -84,10 +85,10 @@ async function waitForReadyTarget(tabs: TabGateway, tabId: number, targetConvers
   throw new Error(lastError);
 }
 
-async function waitForSourceThread(tabs: TabGateway, tabId: number, threadId: string): Promise<void> {
+async function waitForSourceThread(tabs: TabGateway, tabId: number, threadId: string, roundId?: string): Promise<void> {
   for (let attempt = 0; attempt < 50; attempt++) {
     await tabs.sendMessage(tabId, { type: 'pointask:thread-return-ready', threadId }).catch(() => undefined);
-    const response = await tabs.sendMessage(tabId, { type: 'pointask:probe-thread-return', threadId }).catch(() => null) as { ready?: boolean } | null;
+    const response = await tabs.sendMessage(tabId, { type: 'pointask:probe-thread-return', threadId, roundId }).catch(() => null) as { ready?: boolean } | null;
     if (response?.ready) return;
     // Older installed content scripts do not implement the probe. The ready
     // notification above preserves compatibility during extension updates.
@@ -127,10 +128,8 @@ const dependencies: RuntimeDependencies = {
 async function persist(record: PendingAssociation, deps: RuntimeDependencies): Promise<void> {
   const { targetTabId: _transientTargetTabId, ...storedPendingThread } = record.pendingThread;
   void _transientTargetTabId;
-  await Promise.all([
-    deps.threadStore?.upsert(record.localThread),
-    deps.pendingStore?.replaceForThread(storedPendingThread),
-  ]);
+  if (deps.threadStore && deps.pendingStore) await deps.threadStore.upsertAssociation(record.localThread, storedPendingThread);
+  else await Promise.all([deps.threadStore?.upsert(record.localThread), deps.pendingStore?.replaceForThread(storedPendingThread)]);
   if (record.localThread.answerMode === 'workspace' && record.localThread.workspaceId && record.targetConversationUrl) {
     const workspace = await deps.workspaceStore?.get(record.localThread.workspaceId);
     if (workspace) await deps.workspaceStore?.upsert({
@@ -381,6 +380,29 @@ export async function handleRuntimeMessage(
         await notify(record, deps.tabs);
         return { ok: true, data: record };
       }
+      case 'pointask:attach-rounds': {
+        let existing = deps.coordinator.get(message.pendingThreadId);
+        if (!existing) existing = await ensureTargetRecord(message.pendingThreadId, senderTabId, sender.tab?.url, deps);
+        if (!existing) throw new Error('当前页面与该 PointAsk 线程的关联已失效，请重新关联');
+        const record = deps.coordinator.attachRounds(message.pendingThreadId, senderTabId, message.rounds, message.targetUrl);
+        if (!record) throw new Error('所选轮次无法附加到当前线程');
+        try { await persist(record, deps); }
+        catch (error) { deps.coordinator.restoreSnapshot(existing); throw error; }
+        await notify(record, deps.tabs);
+        return { ok: true, data: record };
+      }
+      case 'pointask:stage-round-answer': {
+        let existing = deps.coordinator.get(message.pendingThreadId);
+        if (!existing) existing = await ensureTargetRecord(message.pendingThreadId, senderTabId, sender.tab?.url, deps);
+        if (!existing) throw new Error('当前页面与该 PointAsk 线程的关联已失效，请重新关联');
+        const record = deps.coordinator.stageRoundAnswer(message.pendingThreadId, senderTabId, message.roundId, message.promptHash,
+          message.targetUrl, message.captureFailed, message.richContent, message.answerSource);
+        if (!record) throw new Error('当前回答无法暂存，请确认轮次和 Workspace 页面后重试');
+        try { await persist(record, deps); }
+        catch (error) { deps.coordinator.restoreSnapshot(existing); throw error; }
+        await notify(record, deps.tabs);
+        return { ok: true, data: record };
+      }
       case 'pointask:pending-thread-updated': {
         const existing = deps.coordinator.get(message.pendingThreadId);
         if (!existing) throw new Error('Pending thread not found');
@@ -388,6 +410,7 @@ export async function handleRuntimeMessage(
           if (existing.targetTabId !== senderTabId) throw new Error('Only the target tab may return to source');
           const sourceUrl = existing.localThread.sourceConversationKey || existing.pendingThread.sourcePageUrl;
           const threadId = existing.localThread.id;
+          const roundId = [...threadRounds(existing.localThread, existing.pendingThread)].reverse().find((round) => round.status === 'attached')?.id;
           let sourceTab: { id?: number; url?: string } | null = null;
           if (existing.sourceTabId >= 0 && deps.tabs.get) {
             const remembered = await deps.tabs.get(existing.sourceTabId).catch(() => null);
@@ -406,12 +429,13 @@ export async function handleRuntimeMessage(
           await deps.threadReturnStore?.set({
             id: `pointask-thread-return-${Date.now()}`,
             threadId,
+            roundId,
             sourceConversationUrl: sourceUrl,
             createdAt: new Date().toISOString(),
           });
           await deps.tabs.update(sourceTab.id, { active: true });
           deps.coordinator.restore(existing.pendingThread, existing.localThread, sourceTab.id);
-          await waitForSourceThread(deps.tabs, sourceTab.id, threadId);
+          await waitForSourceThread(deps.tabs, sourceTab.id, threadId, roundId);
           const completed = deps.coordinator.completeReturn(message.pendingThreadId, senderTabId);
           if (completed) { await persist(completed, deps); await notify(completed, deps.tabs); }
           if (completed && settings?.closeDedicatedTabAfterAttach && existing.localThread.answerMode === 'dedicated_branch' &&
@@ -438,12 +462,14 @@ export async function handleRuntimeMessage(
         return { ok: true, data: record };
       }
       case 'pointask:get-page-pending-threads': {
-        const live = deps.coordinator.forPage(senderTabId).filter((record) => record.pendingThread.status !== 'answer_attached');
+        const live = deps.coordinator.forPage(senderTabId).filter((record) => record.pendingThread.status !== 'answer_attached' ||
+          threadRounds(record.localThread, record.pendingThread).some((round) => round.status === 'answer_ready' || round.status === 'generating'));
         if (live.length || !deps.threadStore || !deps.pendingStore) return { ok: true, data: live };
         const [threads, pendingThreads] = await Promise.all([deps.threadStore.list(), deps.pendingStore.list()]);
         const restored: PendingAssociation[] = [];
         for (const thread of threads.filter((item) => {
-          if (['answer_attached', 'failed', 'orphaned'].includes(item.status)) return false;
+          if (['failed', 'orphaned'].includes(item.status)) return false;
+          if (item.status === 'answer_attached' && !threadRounds(item).some((round) => round.status === 'answer_ready' || round.status === 'generating')) return false;
           return item.answerMode === 'current_conversation'
             ? isCompatibleChatGptTargetUrl(item.sourceConversationKey, message.currentUrl)
             : Boolean(item.targetConversationUrl && isCompatibleChatGptTargetUrl(item.targetConversationUrl, message.currentUrl));
@@ -451,7 +477,7 @@ export async function handleRuntimeMessage(
           const pending = pendingThreads.find((item) => (item.threadId || item.id) === thread.id);
           if (!pending) continue;
           deps.coordinator.restore(pending, thread, -1);
-          const record = deps.coordinator.markTargetOpened(thread.id, senderTabId, message.currentUrl);
+          const record = deps.coordinator.markTargetOpened(pending.id, senderTabId, message.currentUrl);
           if (record) restored.push(record);
         }
         return { ok: true, data: restored };

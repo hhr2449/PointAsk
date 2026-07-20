@@ -91,7 +91,11 @@ describe('versioned local stores', () => {
 
   it('clears only PointAsk-owned keys', async () => {
     const driver = new MemoryStorageDriver();
-    await driver.set({ [STORAGE_KEYS.threads]: [thread()], 'another-extension:key': 'keep' });
+    const staged = { ...thread(), rounds: [{ id: 'q1', pendingId: 'pending-q1', promptHash: 'hash-q1', assistantFingerprintsBefore: [],
+      status: 'answer_ready' as const, persistenceStatus: 'staged' as const, stagedAnswer: [{ type: 'text' as const, content: '临时回答' }],
+      answerSource: { conversationUrl: 'https://chatgpt.com/c/workspace', conversationKey: 'https://chatgpt.com/c/workspace', messageFingerprint: 'answer-q1' },
+      capturedAt: createdAt, createdAt, updatedAt: createdAt }] };
+    await driver.set({ [STORAGE_KEYS.threads]: [staged], 'another-extension:key': 'keep' });
     await clearAllPointAskData(driver);
     expect(driver.data['another-extension:key']).toBe('keep');
     expect(driver.data[STORAGE_KEYS.threads]).toBeUndefined();

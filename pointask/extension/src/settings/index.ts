@@ -40,7 +40,7 @@ document.querySelector('#pointask-revoke-authorization')?.addEventListener('clic
   });
 });
 document.querySelector('#pointask-clear')?.addEventListener('click', () => {
-  if (!confirm('确认清除全部 PointAsk 本地数据？此操作不会影响其他扩展数据。')) return;
+  if (!confirm('确认清除全部 PointAsk 本地数据（包括暂存回答）？此操作不会影响其他扩展数据。')) return;
   void clearAllPointAskData(driver).then(() => { status.textContent = 'PointAsk 数据已清除。'; });
 });
 document.querySelector('#pointask-export')?.addEventListener('click', () => {

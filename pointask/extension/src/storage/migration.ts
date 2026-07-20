@@ -42,12 +42,26 @@ export function migrateStorage(raw: Record<string, unknown>): PointAskStorageSch
         content,
         attachedManually: message.attachedManually,
         createdAt: message.createdAt,
+        ...(typeof message.roundId === 'string' ? { roundId: message.roundId } : {}),
+        ...(typeof message.attachedAt === 'string' ? { attachedAt: message.attachedAt } : {}),
         ...(answerSource ? { answerSource } : {}),
       };
     }).filter(Boolean) : [];
+    const rawRounds = Array.isArray(item.rounds) ? item.rounds : [];
+    const rounds = rawRounds.map(record).filter((round): round is Record<string, unknown> => Boolean(round)).map((round) => {
+      const stagedAnswer = normalizeRichBlocks(round.stagedAnswer);
+      const persistenceStatus = ['not_captured', 'staged', 'attaching', 'attached', 'capture_failed'].includes(String(round.persistenceStatus))
+        ? round.persistenceStatus : round.status === 'attached' ? 'attached' : 'not_captured';
+      return {
+        ...round,
+        persistenceStatus,
+        ...(persistenceStatus === 'staged' && stagedAnswer ? { stagedAnswer } : { stagedAnswer: undefined }),
+      };
+    });
     return {
       ...item,
       messages,
+      ...(rounds.length ? { rounds } : {}),
       displayId,
       answerMode: item.answerMode === 'workspace' || item.answerMode === 'current_conversation'
         ? item.answerMode : 'dedicated_branch',
@@ -58,7 +72,7 @@ export function migrateStorage(raw: Record<string, unknown>): PointAskStorageSch
   const pendingThreads = rawPending
     .map((value) => {
       const item = record(value); if (!item) return null;
-      const thread = threads.find((candidate) => candidate.id === item.id);
+      const thread = threads.find((candidate) => candidate.id === (item.threadId ?? item.id));
       if (!thread) return item;
       return {
         ...item,

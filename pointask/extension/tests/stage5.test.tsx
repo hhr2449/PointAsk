@@ -284,7 +284,7 @@ describe('manual answer confirmation and storage', () => {
     act(() => manager.stop());
   });
 
-  it('offers Attach and Attach-and-return for one unique Workspace answer and returns only after saving', async () => {
+  it('attaches a staged Workspace answer after its older DOM node has been unloaded', async () => {
     document.body.innerHTML = chatGptFixture;
     const adapter = new ChatGptAdapter();
     const answer = document.querySelector<HTMLElement>('[data-testid="conversation-turn-2"]')!;
@@ -292,20 +292,26 @@ describe('manual answer confirmation and storage', () => {
     const base = association('workspace-attach-return').record;
     let current: PendingAssociation = {
       ...base,
-      pendingThread: { ...base.pendingThread, answerMode: 'workspace', promptHash: 'workspace-hash', status: 'answer_ready' },
-      localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready' },
+      pendingThread: { ...base.pendingThread, roundId: base.localThread.messages[0]!.id, answerMode: 'workspace', promptHash: 'workspace-hash', status: 'answer_ready' },
+      localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready', rounds: [{
+        id: base.localThread.messages[0]!.id, pendingId: base.pendingThread.id, promptHash: 'workspace-hash', assistantFingerprintsBefore: [],
+        status: 'answer_ready', persistenceStatus: 'staged', stagedAnswer: [{ type: 'paragraph', children: [{ type: 'text', content: '唯一匹配回答' }] }],
+        answerSource: { conversationUrl: 'https://chatgpt.com/c/target', conversationKey: 'https://chatgpt.com/c/target', messageFingerprint: fingerprint },
+        createdAt: base.createdAt, updatedAt: base.updatedAt,
+      }] },
     };
-    vi.spyOn(adapter, 'findCandidateAnswer').mockReturnValue({ element: answer, fingerprint, streaming: false });
-    vi.spyOn(adapter, 'getMessageRichContent').mockReturnValue({
-      plainText: '唯一匹配回答', blocks: [{ type: 'paragraph', children: [{ type: 'text', content: '唯一匹配回答' }] }],
-    });
+    answer.remove();
+    vi.spyOn(adapter, 'findCandidateAnswer').mockReturnValue(null);
+    const extract = vi.spyOn(adapter, 'getMessageRichContent');
     const calls: string[] = [];
     const sendMessage = vi.fn().mockImplementation((message: { type: string }) => {
       calls.push(message.type);
-      if (message.type === 'pointask:attach-answer') current = {
+      if (message.type === 'pointask:attach-rounds') current = {
         ...current,
         pendingThread: { ...current.pendingThread, status: 'answer_attached' },
-        localThread: { ...current.localThread, status: 'answer_attached', messages: [
+        localThread: { ...current.localThread, status: 'answer_attached', rounds: current.localThread.rounds?.map((round) => ({
+          ...round, status: 'attached' as const, persistenceStatus: 'attached' as const, stagedAnswer: undefined, attachedAt: current.updatedAt,
+        })), messages: [
           ...current.localThread.messages,
           { id: 'workspace-answer', role: 'assistant' as const, content: [{ type: 'text' as const, content: '唯一匹配回答' }], attachedManually: true, createdAt: current.updatedAt },
         ] },
@@ -316,11 +322,12 @@ describe('manual answer confirmation and storage', () => {
       { authorize: vi.fn().mockResolvedValue(true) } as never);
     await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
     const banner = document.querySelector('pointask-pending-thread-banner')?.shadowRoot;
-    expect(banner?.textContent).toContain('附加最新回答并返回');
-    const attachAndReturn = manager as unknown as { attachWhole(id: string, returnAfter: boolean): Promise<void> };
-    await act(async () => { await attachAndReturn.attachWhole('workspace-attach-return', true); });
-    expect(calls.indexOf('pointask:attach-answer')).toBeGreaterThanOrEqual(0);
-    expect(calls.indexOf('pointask:pending-thread-updated')).toBeGreaterThan(calls.indexOf('pointask:attach-answer'));
+    expect(banner?.textContent).toContain('附加本轮并返回');
+    const attachAndReturn = manager as unknown as { attachWorkspaceAnswer(id: string, returnAfter: boolean): Promise<boolean> };
+    await act(async () => { await attachAndReturn.attachWorkspaceAnswer('workspace-attach-return', true); });
+    expect(calls.indexOf('pointask:attach-rounds')).toBeGreaterThanOrEqual(0);
+    expect(calls.indexOf('pointask:pending-thread-updated')).toBeGreaterThan(calls.indexOf('pointask:attach-rounds'));
+    expect(extract).not.toHaveBeenCalled();
     act(() => manager.stop());
   });
 
@@ -331,22 +338,269 @@ describe('manual answer confirmation and storage', () => {
     const fingerprint = adapter.getMessageFingerprint(answer); const base = association('workspace-attach-failure').record;
     const current: PendingAssociation = {
       ...base,
-      pendingThread: { ...base.pendingThread, answerMode: 'workspace', promptHash: 'workspace-hash', status: 'answer_ready' },
-      localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready' },
+      pendingThread: { ...base.pendingThread, roundId: base.localThread.messages[0]!.id, answerMode: 'workspace', promptHash: 'workspace-hash', status: 'answer_ready' },
+      localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready', rounds: [{
+        id: base.localThread.messages[0]!.id, pendingId: base.pendingThread.id, promptHash: 'workspace-hash', assistantFingerprintsBefore: [],
+        status: 'answer_ready', persistenceStatus: 'staged', stagedAnswer: [{ type: 'text', content: '回答' }],
+        answerSource: { conversationUrl: 'https://chatgpt.com/c/target', conversationKey: 'https://chatgpt.com/c/target', messageFingerprint: fingerprint },
+        createdAt: base.createdAt, updatedAt: base.updatedAt,
+      }] },
     };
     vi.spyOn(adapter, 'findCandidateAnswer').mockReturnValue({ element: answer, fingerprint, streaming: false });
     vi.spyOn(adapter, 'getMessageRichContent').mockReturnValue({ plainText: '回答', blocks: [{ type: 'text', content: '回答' }] });
-    const sendMessage = vi.fn().mockImplementation((message: { type: string }) => Promise.resolve(message.type === 'pointask:attach-answer'
+    const sendMessage = vi.fn().mockImplementation((message: { type: string }) => Promise.resolve(message.type === 'pointask:attach-rounds'
       ? { ok: false, error: '附加失败，请重试' } : { ok: true, data: current }));
     const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }), new ClipboardManager(undefined, () => false), adapter,
       { authorize: vi.fn().mockResolvedValue(true) } as never);
     await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
-    const attachAndReturn = manager as unknown as { attachWhole(id: string, returnAfter: boolean): Promise<void> };
-    await act(async () => { await attachAndReturn.attachWhole('workspace-attach-failure', true); });
+    const attachAndReturn = manager as unknown as { attachWorkspaceAnswer(id: string, returnAfter: boolean): Promise<boolean> };
+    await act(async () => { await attachAndReturn.attachWorkspaceAnswer('workspace-attach-failure', true); });
     expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({
       type: 'pointask:pending-thread-updated', action: 'return-source',
     }));
     expect(document.querySelector('pointask-pending-thread-banner')?.shadowRoot?.textContent).toContain('附加失败，请重试');
+    act(() => manager.stop());
+  });
+
+  it('submits only selected reliable rounds and excludes a disabled ambiguous round from the payload', async () => {
+    document.body.innerHTML = '<article id="answer-two"></article><article id="answer-three"></article>';
+    const adapter = new ChatGptAdapter();
+    const answerTwo = document.getElementById('answer-two')!; const answerThree = document.getElementById('answer-three')!;
+    const base = association('workspace-selected-rounds').record;
+    let current: PendingAssociation = {
+      ...base,
+      pendingThread: { ...base.pendingThread, threadId: base.localThread.id, roundId: 'q3', answerMode: 'workspace',
+        promptHash: 'hash-3', status: 'answer_ready' },
+      localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready', messages: ['q1', 'q2', 'q3'].map((id) => ({
+        id, role: 'user' as const, content: [{ type: 'text' as const, content: `问题-${id}` }], attachedManually: false, createdAt: base.createdAt,
+      })), rounds: ['q1', 'q2', 'q3'].map((id, index) => ({ id, pendingId: `pending-${id}`, promptHash: `hash-${index + 1}`,
+        assistantFingerprintsBefore: [], status: 'answer_ready' as const, persistenceStatus: id === 'q1' ? 'not_captured' as const : 'staged' as const,
+        stagedAnswer: id === 'q1' ? undefined : [{ type: 'text' as const, content: `回答-${id}` }],
+        answerSource: id === 'q1' ? undefined : { conversationUrl: 'https://chatgpt.com/c/target', conversationKey: 'https://chatgpt.com/c/target', messageFingerprint: `answer-${id.slice(1)}` },
+        createdAt: base.createdAt, updatedAt: base.updatedAt })) },
+    };
+    vi.spyOn(adapter, 'findCandidateAnswer').mockImplementation((hash) => hash === 'hash-2'
+      ? { element: answerTwo, fingerprint: 'answer-2', streaming: false }
+      : hash === 'hash-3' ? { element: answerThree, fingerprint: 'answer-3', streaming: false } : null);
+    vi.spyOn(adapter, 'getMessageRichContent').mockImplementation((element) => ({ plainText: element === answerTwo ? '回答二' : '回答三',
+      blocks: [{ type: 'text', content: element === answerTwo ? '回答二' : '回答三' }] }));
+    const attachMessages: Array<{ rounds: Array<{ roundId: string }> }> = [];
+    const sendMessage = vi.fn().mockImplementation((message: { type: string; rounds?: Array<{ roundId: string }> }) => {
+      if (message.type === 'pointask:attach-rounds') {
+        attachMessages.push(message as { rounds: Array<{ roundId: string }> });
+        const ids = new Set(message.rounds?.map((round) => round.roundId));
+        current = { ...current, pendingThread: { ...current.pendingThread, status: 'answer_attached' }, localThread: {
+          ...current.localThread, status: 'answer_attached', rounds: current.localThread.rounds?.map((round) => ids.has(round.id)
+            ? { ...round, status: 'attached' as const, persistenceStatus: 'attached' as const, stagedAnswer: undefined, attachedAt: base.updatedAt } : round),
+        } };
+      }
+      return Promise.resolve({ ok: true, data: current });
+    });
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }), new ClipboardManager(undefined, () => false), adapter,
+      { authorize: vi.fn().mockResolvedValue(true) } as never);
+    await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
+    const internal = manager as unknown as { attachWorkspaceRounds(id: string, ids: string[]): Promise<boolean> };
+    let saved = false;
+    await act(async () => { saved = await internal.attachWorkspaceRounds('workspace-selected-rounds', ['q1', 'q2', 'q3']); });
+    expect(saved).toBe(true);
+    expect(attachMessages).toHaveLength(1);
+    expect(attachMessages[0]!.rounds.map((round) => round.roundId)).toEqual(['q2', 'q3']);
+    expect(current.localThread.rounds?.filter((round) => ['q2', 'q3'].includes(round.id)).every((round) =>
+      round.persistenceStatus === 'attached' && round.stagedAnswer === undefined)).toBe(true);
+    act(() => manager.stop());
+  });
+
+  it('skips an invalid staged round without blocking another selected staged round', async () => {
+    document.body.innerHTML = '<article id="answer-two"></article><article id="answer-three"></article>';
+    const adapter = new ChatGptAdapter();
+    const answerTwo = document.getElementById('answer-two')!; const answerThree = document.getElementById('answer-three')!;
+    const base = association('workspace-missing-rich-content').record;
+    const current: PendingAssociation = { ...base,
+      pendingThread: { ...base.pendingThread, threadId: base.localThread.id, roundId: 'q3', answerMode: 'workspace', promptHash: 'hash-3', status: 'answer_ready' },
+      localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready', messages: ['q2', 'q3'].map((id) => ({
+        id, role: 'user' as const, content: [{ type: 'text' as const, content: `问题-${id}` }], attachedManually: false, createdAt: base.createdAt,
+      })), rounds: ['q2', 'q3'].map((id) => ({ id, pendingId: `pending-${id}`, promptHash: `hash-${id.slice(1)}`,
+        assistantFingerprintsBefore: [], status: 'answer_ready' as const, persistenceStatus: 'staged' as const,
+        stagedAnswer: id === 'q3' ? [] : [{ type: 'text' as const, content: `回答-${id}` }],
+        answerSource: { conversationUrl: 'https://chatgpt.com/c/target', conversationKey: 'https://chatgpt.com/c/target', messageFingerprint: `answer-${id.slice(1)}` },
+        createdAt: base.createdAt, updatedAt: base.updatedAt })) } };
+    vi.spyOn(adapter, 'findCandidateAnswer').mockImplementation((hash) => hash === 'hash-2'
+      ? { element: answerTwo, fingerprint: 'answer-2', streaming: false }
+      : { element: answerThree, fingerprint: 'answer-3', streaming: false });
+    vi.spyOn(adapter, 'getMessageRichContent').mockImplementation((element) => element === answerTwo
+      ? { plainText: '回答二', blocks: [{ type: 'text', content: '回答二' }] }
+      : { plainText: '', blocks: [] });
+    let updated = current;
+    const sendMessage = vi.fn().mockImplementation((message: { type: string; rounds?: Array<{ roundId: string }> }) => {
+      if (message.type === 'pointask:attach-rounds') {
+        const ids = new Set(message.rounds?.map((round) => round.roundId));
+        updated = { ...updated, localThread: { ...updated.localThread, rounds: updated.localThread.rounds?.map((round) => ids.has(round.id)
+          ? { ...round, status: 'attached' as const, persistenceStatus: 'attached' as const, stagedAnswer: undefined } : round) } };
+      }
+      return Promise.resolve({ ok: true, data: updated });
+    });
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }), new ClipboardManager(undefined, () => false), adapter,
+      { authorize: vi.fn().mockResolvedValue(true) } as never);
+    await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
+    const internal = manager as unknown as { attachWorkspaceRounds(id: string, ids: string[]): Promise<boolean> };
+    await act(async () => { await internal.attachWorkspaceRounds('workspace-missing-rich-content', ['q2', 'q3']); });
+    const attach = sendMessage.mock.calls.map(([message]) => message).find((message) => message.type === 'pointask:attach-rounds');
+    expect(attach?.rounds.map((round: { roundId: string }) => round.roundId)).toEqual(['q2']);
+    expect(updated.localThread.rounds?.find((round) => round.id === 'q3')?.persistenceStatus).toBe('staged');
+    act(() => manager.stop());
+  });
+
+  it('keeps a successful attachment when navigation fails and retry return never attaches again', async () => {
+    document.body.innerHTML = chatGptFixture;
+    const adapter = new ChatGptAdapter(); const answer = document.querySelector<HTMLElement>('[data-testid="conversation-turn-2"]')!;
+    const fingerprint = adapter.getMessageFingerprint(answer); const base = association('workspace-return-after-save').record;
+    let current: PendingAssociation = { ...base,
+      pendingThread: { ...base.pendingThread, threadId: base.localThread.id, roundId: base.localThread.messages[0]!.id,
+        answerMode: 'workspace', promptHash: 'workspace-return-hash', status: 'answer_ready' },
+      localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready', rounds: [{
+        id: base.localThread.messages[0]!.id, pendingId: base.pendingThread.id, promptHash: 'workspace-return-hash', assistantFingerprintsBefore: [],
+        status: 'answer_ready', persistenceStatus: 'staged', stagedAnswer: [{ type: 'text', content: '已保存回答' }],
+        answerSource: { conversationUrl: 'https://chatgpt.com/c/target', conversationKey: 'https://chatgpt.com/c/target', messageFingerprint: fingerprint },
+        createdAt: base.createdAt, updatedAt: base.updatedAt,
+      }] } };
+    vi.spyOn(adapter, 'findCandidateAnswer').mockReturnValue({ element: answer, fingerprint, streaming: false });
+    vi.spyOn(adapter, 'getMessageRichContent').mockReturnValue({ plainText: '已保存回答', blocks: [{ type: 'text', content: '已保存回答' }] });
+    let returnAttempts = 0;
+    const sendMessage = vi.fn().mockImplementation((message: { type: string }) => {
+      if (message.type === 'pointask:attach-rounds') current = { ...current,
+        pendingThread: { ...current.pendingThread, status: 'answer_attached' },
+        localThread: { ...current.localThread, status: 'answer_attached', rounds: current.localThread.rounds?.map((round) => ({
+          ...round, status: 'attached' as const, persistenceStatus: 'attached' as const, stagedAnswer: undefined, attachedAt: current.updatedAt,
+        })), messages: [...current.localThread.messages, {
+          id: 'answer-saved', roundId: current.localThread.messages[0]!.id, role: 'assistant' as const,
+          content: [{ type: 'text' as const, content: '已保存回答' }], attachedManually: true, attachedAt: current.updatedAt, createdAt: current.updatedAt,
+        }] } };
+      if (message.type === 'pointask:pending-thread-updated') {
+        returnAttempts++;
+        return Promise.resolve(returnAttempts === 1 ? { ok: false, error: 'Source thread did not become ready' } : { ok: true });
+      }
+      return Promise.resolve({ ok: true, data: current });
+    });
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }), new ClipboardManager(undefined, () => false), adapter,
+      { authorize: vi.fn().mockResolvedValue(true) } as never);
+    await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
+    const internal = manager as unknown as { attachWorkspaceAnswer(id: string, returnAfter: boolean): Promise<boolean>;
+      runWorkspacePrimary(id: string): Promise<void> };
+    await act(async () => { await internal.attachWorkspaceAnswer('workspace-return-after-save', true); });
+    const shadow = document.querySelector('pointask-pending-thread-banner')?.shadowRoot;
+    expect(shadow?.textContent).toContain('内容已附加，但未能返回原页面');
+    expect(shadow?.textContent).toContain('重试返回');
+    expect(sendMessage.mock.calls.filter(([message]) => message.type === 'pointask:attach-rounds')).toHaveLength(1);
+    await act(async () => { await internal.runWorkspacePrimary('workspace-return-after-save'); });
+    expect(sendMessage.mock.calls.filter(([message]) => message.type === 'pointask:attach-rounds')).toHaveLength(1);
+    expect(returnAttempts).toBe(2);
+    act(() => manager.stop());
+  });
+
+  it('continues in the same Workspace thread with a new round and never attaches the previous answer', async () => {
+    document.body.innerHTML = chatGptFixture;
+    const adapter = new ChatGptAdapter();
+    const answer = document.querySelector<HTMLElement>('[data-testid="conversation-turn-2"]')!;
+    const fingerprint = adapter.getMessageFingerprint(answer);
+    const base = association('workspace-continue-only').record;
+    const firstRoundId = base.localThread.messages[0]!.id;
+    let current: PendingAssociation = {
+      ...base,
+      pendingThread: { ...base.pendingThread, threadId: base.localThread.id, roundId: firstRoundId, answerMode: 'workspace',
+        promptHash: 'workspace-first-hash', candidateAnswerFingerprint: fingerprint, status: 'answer_ready', targetConversationUrl: window.location.href },
+      targetConversationUrl: window.location.href,
+      localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready', targetConversationUrl: window.location.href, rounds: [{ id: firstRoundId,
+        pendingId: base.pendingThread.id, promptHash: 'workspace-first-hash', assistantFingerprintsBefore: [],
+        candidateAnswerFingerprint: fingerprint, status: 'answer_ready', persistenceStatus: 'not_captured',
+        createdAt: base.createdAt, updatedAt: base.updatedAt }] },
+    };
+    vi.spyOn(adapter, 'findCandidateAnswer').mockReturnValue({ element: answer, fingerprint, streaming: false });
+    vi.spyOn(adapter, 'getAssistantMessageFingerprints').mockReturnValue([fingerprint]);
+    vi.spyOn(adapter, 'waitForComposerReady').mockResolvedValue(true);
+    vi.spyOn(adapter, 'waitForSubmitReady').mockResolvedValue(true);
+    vi.spyOn(adapter, 'fillComposer').mockReturnValue(true);
+    vi.spyOn(adapter, 'submitComposer').mockReturnValue(true);
+    vi.spyOn(adapter, 'hasSubmittedPrompt').mockReturnValue(true);
+    const sent: Array<{ type: string; [key: string]: unknown }> = [];
+    const sendMessage = vi.fn().mockImplementation((message: { type: string; [key: string]: unknown }) => {
+      sent.push(message);
+      if (message.type === 'pointask:stage-round-answer') current = { ...current, localThread: { ...current.localThread,
+        rounds: current.localThread.rounds?.map((round) => round.id === firstRoundId ? { ...round, persistenceStatus: 'staged' as const,
+          stagedAnswer: [{ type: 'text' as const, content: '第一轮暂存回答' }], answerSource: {
+            conversationUrl: window.location.href, conversationKey: window.location.href, messageFingerprint: fingerprint,
+          } } : round) } };
+      if (message.type === 'pointask:create-pending-thread') current = {
+        ...current, pendingThread: message.pendingThread as PendingThread,
+        localThread: message.localThread as PendingAssociation['localThread'], updatedAt: '2026-07-12T01:00:00.000Z',
+      };
+      if (message.type === 'pointask:reserve-prompt-submission') current = {
+        ...current,
+        pendingThread: { ...current.pendingThread, submittedPromptHash: current.pendingThread.promptHash, status: 'waiting_for_answer' },
+        localThread: { ...current.localThread, status: 'waiting_for_answer' },
+      };
+      return Promise.resolve({ ok: true, data: current });
+    });
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }), new ClipboardManager(undefined, () => false), adapter,
+      { authorize: vi.fn().mockResolvedValue(true) } as never);
+    await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
+    const internal = manager as unknown as { continueWorkspaceThread(id: string, question: string): Promise<{ ok: boolean }> };
+    let continued = { ok: false };
+    await act(async () => { continued = await internal.continueWorkspaceThread('workspace-continue-only', '第二轮问题'); });
+    expect(continued.ok).toBe(true);
+    expect(sent.findIndex((message) => message.type === 'pointask:stage-round-answer'))
+      .toBeLessThan(sent.findIndex((message) => message.type === 'pointask:create-pending-thread'));
+    const create = sent.find((message) => message.type === 'pointask:create-pending-thread')!;
+    const nextPending = create.pendingThread as PendingThread;
+    const nextThread = create.localThread as PendingAssociation['localThread'];
+    expect(nextPending.threadId).toBe(base.localThread.id);
+    expect(nextPending.id).not.toBe(base.pendingThread.id);
+    expect(nextPending.roundId).toBeTruthy();
+    expect(nextThread.messages.map((message) => message.role)).toEqual(['user', 'user']);
+    expect(nextThread.rounds).toHaveLength(2);
+    expect(sent.some((message) => message.type === 'pointask:attach-answer' || message.type === 'pointask:attach-rounds')).toBe(false);
+    act(() => manager.stop());
+  });
+
+  it('keeps the question when staging fails and continues only after the explicit skip action', async () => {
+    document.body.innerHTML = '<main></main>';
+    const adapter = new ChatGptAdapter(); const base = association('workspace-stage-failed').record;
+    const roundId = base.localThread.messages[0]!.id; let current: PendingAssociation = { ...base,
+      targetConversationUrl: window.location.href,
+      pendingThread: { ...base.pendingThread, threadId: base.localThread.id, roundId, answerMode: 'workspace', promptHash: 'missing-answer-hash',
+        candidateAnswerFingerprint: 'unloaded-answer', status: 'answer_ready', targetConversationUrl: window.location.href },
+      localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready', targetConversationUrl: window.location.href,
+        rounds: [{ id: roundId, pendingId: base.pendingThread.id, promptHash: 'missing-answer-hash', assistantFingerprintsBefore: [],
+          candidateAnswerFingerprint: 'unloaded-answer', status: 'answer_ready', persistenceStatus: 'not_captured', answerSource: {
+            conversationUrl: window.location.href, conversationKey: window.location.href, messageFingerprint: 'unloaded-answer',
+          }, createdAt: base.createdAt, updatedAt: base.updatedAt }] } };
+    vi.spyOn(adapter, 'findCandidateAnswer').mockReturnValue(null); vi.spyOn(adapter, 'findAssistantMessageByFingerprint').mockReturnValue(null);
+    vi.spyOn(adapter, 'waitForComposerReady').mockResolvedValue(true); vi.spyOn(adapter, 'waitForSubmitReady').mockResolvedValue(true);
+    vi.spyOn(adapter, 'fillComposer').mockReturnValue(true); vi.spyOn(adapter, 'hasSubmittedPrompt').mockReturnValue(true);
+    const sent: Array<{ type: string; [key: string]: unknown }> = [];
+    const sendMessage = vi.fn().mockImplementation((message: { type: string; [key: string]: unknown }) => {
+      sent.push(message);
+      if (message.type === 'pointask:stage-round-answer') current = { ...current, localThread: { ...current.localThread,
+        rounds: current.localThread.rounds?.map((round) => ({ ...round, persistenceStatus: 'capture_failed' as const, stagedAnswer: undefined })) } };
+      if (message.type === 'pointask:create-pending-thread') current = { ...current, pendingThread: message.pendingThread as PendingThread,
+        localThread: message.localThread as PendingAssociation['localThread'] };
+      return Promise.resolve({ ok: true, data: current });
+    });
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }), new ClipboardManager(undefined, () => false), adapter,
+      { authorize: vi.fn().mockResolvedValue(true) } as never);
+    await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
+    const internal = manager as unknown as { continueWorkspaceThread(id: string, question: string, skip?: boolean): Promise<{ ok: boolean; captureFailed?: boolean }> };
+    let failed: { ok: boolean; captureFailed?: boolean } = { ok: true };
+    await act(async () => { failed = await internal.continueWorkspaceThread('workspace-stage-failed', '下一轮问题'); });
+    expect(failed).toMatchObject({ ok: false, captureFailed: true });
+    expect((failed as { error?: string }).error).toContain('回答当前未加载');
+    expect(sent.some((message) => message.type === 'pointask:create-pending-thread')).toBe(false);
+    let skipped = { ok: false };
+    await act(async () => { skipped = await internal.continueWorkspaceThread('workspace-stage-failed', '下一轮问题', true); });
+    expect(skipped.ok).toBe(true);
+    const created = sent.find((message) => message.type === 'pointask:create-pending-thread')!;
+    const oldRound = (created.localThread as PendingAssociation['localThread']).rounds?.find((round) => round.id === roundId);
+    expect(oldRound).toMatchObject({ persistenceStatus: 'capture_failed' });
+    expect(oldRound?.stagedAnswer).toBeUndefined();
     act(() => manager.stop());
   });
 
@@ -377,7 +631,7 @@ describe('manual answer confirmation and storage', () => {
     const banner = document.querySelector('pointask-pending-thread-banner')?.shadowRoot;
     expect(banner?.textContent).toContain('匹配不明确');
     expect(banner?.textContent).toContain('先选择回答内容');
-    expect(banner?.textContent).not.toContain('附加最新回答并返回');
+    expect(banner?.textContent).not.toContain('附加本轮并返回');
     act(() => manager.stop());
   });
 

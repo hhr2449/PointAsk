@@ -1,7 +1,7 @@
 import type { PendingThread } from '../bridge/pending-thread-manager';
 import type { LocalThread, PointAskWorkspace } from '../shared/local-thread';
 
-export const STORAGE_SCHEMA_VERSION = 6;
+export const STORAGE_SCHEMA_VERSION = 8;
 export const STORAGE_KEYS = {
   threads: 'pointask:threads',
   pendingThreads: 'pointask:pending-threads',

@@ -100,7 +100,7 @@ if (adapter.isSupportedPage()) {
   const recoveryAttempts = new Map<string, number>();
   const revealReturnedThread = async (): Promise<void> => {
     const navigation = await webBridge.getPendingThreadReturn().catch(() => null);
-    if (!navigation || !threads.reveal(navigation.threadId)) return;
+    if (!navigation || !threads.reveal(navigation.threadId, navigation.roundId)) return;
     await webBridge.completeNavigation(navigation.id).catch(() => undefined);
   };
   let restoreInProgress = false;
@@ -161,7 +161,7 @@ if (adapter.isSupportedPage()) {
   void threads.refreshWorkspaceContextProgress().catch(() => undefined);
   webBridge.onPendingUpdated((record) => threads.handleAssociationUpdate(record));
   webBridge.onThreadReturnReady(() => { void restoreSourceThreads().then(revealReturnedThread).catch(() => undefined); });
-  webBridge.onThreadReturnProbe((threadId) => threads.reveal(threadId));
+  webBridge.onThreadReturnProbe((threadId, roundId) => threads.reveal(threadId, roundId));
   const toolbar = new SelectionToolbar({
     onFollowUp: (selection) => {
       const data = hydrateSelectionContext(adapter, selection);

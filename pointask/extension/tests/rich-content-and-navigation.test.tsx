@@ -323,4 +323,21 @@ describe('view anchor and migration', () => {
     expect(first.threads[0]?.messages[0]?.content).toEqual([{ type: 'text', content: '旧问题' }]);
     expect(migrateStorage({ [STORAGE_KEYS.threads]: first.threads })).toEqual(first);
   });
+
+  it('migrates round persistence state and preserves valid staged rich content idempotently', () => {
+    const base = { id: 'staged', displayId: 'PA-002', answerMode: 'workspace', anchor: { pageUrl: 'https://chatgpt.com/c/a',
+      sourcePageUrl: 'https://chatgpt.com/c/a', conversationKey: 'https://chatgpt.com/c/a', messageFingerprint: 'm2', assistantMessageHash: 'm2',
+      selectedText: '选区', prefixText: '', suffixText: '', paragraphText: '段落', paragraphHash: 'p2', startOffset: 0, endOffset: 2,
+      schemaVersion: 1, createdAt: '2026-01-01T00:00:00.000Z' }, sourcePageUrl: 'https://chatgpt.com/c/a',
+      sourceConversationKey: 'https://chatgpt.com/c/a', sourceMessageFingerprint: 'm2', targetConversationUrl: 'https://chatgpt.com/c/workspace',
+      messages: [{ id: 'q1', role: 'user', content: [{ type: 'text', content: '问题' }], attachedManually: false, createdAt: '2026-01-01T00:00:00.000Z' }],
+      rounds: [{ id: 'q1', pendingId: 'pending-q1', promptHash: 'hash-q1', assistantFingerprintsBefore: [], status: 'answer_ready',
+        persistenceStatus: 'staged', stagedAnswer: [{ type: 'text', content: '暂存回答' }], answerSource: {
+          conversationUrl: 'https://chatgpt.com/c/workspace', conversationKey: 'https://chatgpt.com/c/workspace', messageFingerprint: 'a1' },
+        capturedAt: '2026-01-01T00:01:00.000Z', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:01:00.000Z' }],
+      status: 'answer_ready', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:01:00.000Z' };
+    const first = migrateStorage({ [STORAGE_KEYS.threads]: [base] });
+    expect(first.threads[0]?.rounds?.[0]).toMatchObject({ persistenceStatus: 'staged', stagedAnswer: [{ type: 'text', content: '暂存回答' }] });
+    expect(migrateStorage({ [STORAGE_KEYS.threads]: first.threads })).toEqual(first);
+  });
 });

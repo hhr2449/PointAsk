@@ -1,6 +1,12 @@
 import type { PendingThread } from './pending-thread-manager';
 import type { AnswerSourceLocator, LocalThread, RichContentBlock } from '../shared/local-thread';
 
+export interface AttachedRoundPayload {
+  roundId: string;
+  richContent: RichContentBlock[];
+  answerSource: AnswerSourceLocator;
+}
+
 export type AssociationStatus =
   | 'created'
   | 'target_opened'
@@ -28,6 +34,9 @@ export type PointAskRuntimeMessage =
   | { type: 'pointask:pending-thread-updated'; pendingThreadId: string; action: 'manual-branch' | 'return-source' }
   | { type: 'pointask:cancel-pending-thread'; pendingThreadId: string }
   | { type: 'pointask:attach-answer'; pendingThreadId: string; selectedText?: string; richContent?: RichContentBlock[]; answerSource?: AnswerSourceLocator; targetUrl: string; replace: boolean }
+  | { type: 'pointask:attach-rounds'; pendingThreadId: string; rounds: AttachedRoundPayload[]; targetUrl: string }
+  | { type: 'pointask:stage-round-answer'; pendingThreadId: string; roundId: string; promptHash: string; targetUrl: string;
+      captureFailed: boolean; richContent?: RichContentBlock[]; answerSource?: AnswerSourceLocator }
   | { type: 'pointask:open-answer-page'; pendingThreadId: string }
   | { type: 'pointask:update-local-thread'; pendingThread: PendingThread; localThread: LocalThread }
   | { type: 'pointask:unlink-target-page'; pendingThreadId: string }
@@ -51,6 +60,8 @@ const messageTypes = new Set([
   'pointask:pending-thread-updated',
   'pointask:cancel-pending-thread',
   'pointask:attach-answer',
+  'pointask:attach-rounds',
+  'pointask:stage-round-answer',
   'pointask:open-answer-page',
   'pointask:update-local-thread',
   'pointask:unlink-target-page',
@@ -159,6 +170,17 @@ export function isPointAskRuntimeMessage(value: unknown): value is PointAskRunti
         ((isNonEmptyString(value.selectedText) && value.selectedText.length <= 8_000) || isRichContent(value.richContent)) &&
         (value.answerSource === undefined || isAnswerSource(value.answerSource)) &&
         isNonEmptyString(value.targetUrl) && isChatGptUrl(value.targetUrl) && typeof value.replace === 'boolean';
+    case 'pointask:attach-rounds':
+      return hasOnlyKeys(value, ['type', 'pendingThreadId', 'rounds', 'targetUrl']) && isNonEmptyString(value.pendingThreadId) &&
+        isNonEmptyString(value.targetUrl) && isChatGptUrl(value.targetUrl) && Array.isArray(value.rounds) && value.rounds.length > 0 &&
+        value.rounds.length <= 50 && value.rounds.every((raw) => isRecord(raw) && hasOnlyKeys(raw, ['roundId', 'richContent', 'answerSource']) &&
+          isNonEmptyString(raw.roundId) && isRichContent(raw.richContent) && isAnswerSource(raw.answerSource));
+    case 'pointask:stage-round-answer':
+      return hasOnlyKeys(value, ['type', 'pendingThreadId', 'roundId', 'promptHash', 'targetUrl', 'captureFailed', 'richContent', 'answerSource']) &&
+        [value.pendingThreadId, value.roundId, value.promptHash, value.targetUrl].every(isNonEmptyString) && isChatGptUrl(value.targetUrl as string) &&
+        typeof value.captureFailed === 'boolean' && (value.captureFailed
+          ? value.richContent === undefined && (value.answerSource === undefined || isAnswerSource(value.answerSource))
+          : isRichContent(value.richContent) && isAnswerSource(value.answerSource));
     case 'pointask:pending-thread-updated':
       return hasOnlyKeys(value, ['type', 'pendingThreadId', 'action']) && isNonEmptyString(value.pendingThreadId) &&
         (value.action === 'manual-branch' || value.action === 'return-source');
@@ -183,7 +205,7 @@ export function isPointAskRuntimeMessage(value: unknown): value is PointAskRunti
   }
 }
 
-function isRichContent(value: unknown): value is RichContentBlock[] {
+export function isRichContent(value: unknown): value is RichContentBlock[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > 500) return false;
   let contentLength = 0;
   const validate = (raw: unknown, depth = 0): boolean => {
@@ -284,7 +306,7 @@ export function isLocalThread(value: unknown): value is LocalThread {
   if (!hasOnlyKeys(value, [
     'id', 'anchor', 'sourcePageUrl', 'sourceConversationKey', 'sourceMessageFingerprint', 'targetConversationUrl',
     'messages', 'status', 'createdAt', 'updatedAt', 'expanded', 'collapsedRoundIds', 'displayId', 'answerMode', 'workspaceId',
-    'dedicatedConversationUrl', 'richSelection',
+    'dedicatedConversationUrl', 'richSelection', 'rounds',
   ])) return false;
   if (!['id', 'sourcePageUrl', 'sourceConversationKey', 'sourceMessageFingerprint', 'createdAt', 'updatedAt', 'displayId', 'answerMode']
     .every((key) => isNonEmptyString(value[key]))) return false;
@@ -301,6 +323,22 @@ export function isLocalThread(value: unknown): value is LocalThread {
   if (!/^PA-\d{3,}$/.test(String(value.displayId)) || (value.workspaceId !== undefined && !isNonEmptyString(value.workspaceId))) return false;
   if (value.expanded !== undefined && typeof value.expanded !== 'boolean') return false;
   if (value.collapsedRoundIds !== undefined && (!Array.isArray(value.collapsedRoundIds) || !value.collapsedRoundIds.every(isNonEmptyString))) return false;
+  if (value.rounds !== undefined && (!Array.isArray(value.rounds) || !value.rounds.every((raw) => {
+    if (!isRecord(raw) || !hasOnlyKeys(raw, ['id', 'pendingId', 'promptHash', 'assistantFingerprintsBefore', 'candidateAnswerFingerprint',
+      'status', 'persistenceStatus', 'stagedAnswer', 'capturedAt', 'attachedAt', 'answerSource', 'createdAt', 'updatedAt'])) return false;
+    return ['id', 'pendingId', 'promptHash', 'createdAt', 'updatedAt'].every((key) => isNonEmptyString(raw[key])) &&
+      Array.isArray(raw.assistantFingerprintsBefore) && raw.assistantFingerprintsBefore.every(isNonEmptyString) &&
+      ['waiting_for_submission', 'waiting_for_answer', 'generating', 'answer_ready', 'failed', 'attached'].includes(String(raw.status)) &&
+      ['not_captured', 'staged', 'attaching', 'attached', 'capture_failed'].includes(String(raw.persistenceStatus)) &&
+      (raw.stagedAnswer === undefined || isRichContent(raw.stagedAnswer)) &&
+      (raw.capturedAt === undefined || isNonEmptyString(raw.capturedAt) && Number.isFinite(Date.parse(raw.capturedAt))) &&
+      (raw.candidateAnswerFingerprint === undefined || isNonEmptyString(raw.candidateAnswerFingerprint)) &&
+      (raw.attachedAt === undefined || isNonEmptyString(raw.attachedAt) && Number.isFinite(Date.parse(raw.attachedAt))) &&
+      (raw.answerSource === undefined || isAnswerSource(raw.answerSource)) &&
+      Number.isFinite(Date.parse(String(raw.createdAt))) && Number.isFinite(Date.parse(String(raw.updatedAt))) &&
+      (raw.persistenceStatus !== 'staged' || isRichContent(raw.stagedAnswer) && isAnswerSource(raw.answerSource)) &&
+      (raw.persistenceStatus === 'staged' || raw.stagedAnswer === undefined);
+  }))) return false;
   if (!isChatGptUrl(value.sourcePageUrl as string) || !isChatGptUrl(value.sourceConversationKey as string)) return false;
   if (!isChatGptUrl(anchor.sourcePageUrl as string) || !isChatGptUrl(anchor.conversationKey as string) ||
     value.sourcePageUrl !== anchor.sourcePageUrl || value.sourceConversationKey !== anchor.conversationKey ||
@@ -311,15 +349,23 @@ export function isLocalThread(value: unknown): value is LocalThread {
     (!isNonEmptyString(value.dedicatedConversationUrl) || !isChatGptUrl(value.dedicatedConversationUrl))) return false;
   if (value.richSelection !== undefined && !isRichSelection(value.richSelection)) return false;
   if (!Number.isFinite(Date.parse(value.createdAt as string)) || !Number.isFinite(Date.parse(value.updatedAt as string))) return false;
-  let expectedRole: 'user' | 'assistant' = 'user';
+  const answeredRoundIds = new Set<string>();
+  let latestUserId: string | null = null;
   for (const message of value.messages) {
-    if (!isRecord(message) || !hasOnlyKeys(message, ['id', 'role', 'content', 'answerSource', 'attachedManually', 'createdAt'])) return false;
-    if (!isNonEmptyString(message.id) || !isRichContent(message.content) || message.role !== expectedRole ||
+    if (!isRecord(message) || !hasOnlyKeys(message, ['id', 'role', 'content', 'answerSource', 'roundId', 'attachedAt', 'attachedManually', 'createdAt'])) return false;
+    if (!isNonEmptyString(message.id) || !isRichContent(message.content) || !['user', 'assistant'].includes(String(message.role)) ||
       typeof message.attachedManually !== 'boolean' || !isNonEmptyString(message.createdAt) ||
       !Number.isFinite(Date.parse(message.createdAt))) return false;
     if (message.answerSource !== undefined && !isAnswerSource(message.answerSource)) return false;
+    if (message.roundId !== undefined && !isNonEmptyString(message.roundId)) return false;
+    if (message.attachedAt !== undefined && (!isNonEmptyString(message.attachedAt) || !Number.isFinite(Date.parse(message.attachedAt)))) return false;
     if ((message.role === 'assistant') !== message.attachedManually) return false;
-    expectedRole = expectedRole === 'user' ? 'assistant' : 'user';
+    if (message.role === 'user') latestUserId = message.id as string;
+    else {
+      const roundId = typeof message.roundId === 'string' ? message.roundId : latestUserId;
+      if (!roundId || answeredRoundIds.has(roundId)) return false;
+      answeredRoundIds.add(roundId);
+    }
   }
   return value.messages.length > 0;
 }

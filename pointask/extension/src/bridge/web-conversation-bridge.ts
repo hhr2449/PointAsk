@@ -1,6 +1,7 @@
 import type { PendingThread } from './pending-thread-manager';
 import { isPendingAssociationUpdate, type PendingAssociation, type PointAskRuntimeMessage } from './runtime-messages';
 import type { AnswerSourceLocator, RichContentBlock } from '../shared/local-thread';
+import type { AttachedRoundPayload } from './runtime-messages';
 import type { PendingNavigation, PendingThreadReturn } from '../storage/navigation-store';
 import { isExtensionContextInvalidated } from '../storage/storage-driver';
 
@@ -66,6 +67,18 @@ export class WebConversationBridge {
     });
   }
 
+  async attachRounds(pendingThreadId: string, rounds: AttachedRoundPayload[], targetUrl = window.location.href): Promise<PendingAssociation> {
+    return this.send({ type: 'pointask:attach-rounds', pendingThreadId, rounds, targetUrl });
+  }
+
+  async stageRoundAnswer(pendingThreadId: string, roundId: string, promptHash: string, options: {
+    captureFailed: boolean; richContent?: RichContentBlock[]; answerSource?: AnswerSourceLocator; targetUrl?: string;
+  }): Promise<PendingAssociation> {
+    return this.send({ type: 'pointask:stage-round-answer', pendingThreadId, roundId, promptHash,
+      targetUrl: options.targetUrl ?? window.location.href, captureFailed: options.captureFailed,
+      richContent: options.richContent, answerSource: options.answerSource });
+  }
+
   async returnToSource(pendingThreadId: string): Promise<void> {
     await this.send({ type: 'pointask:pending-thread-updated', pendingThreadId, action: 'return-source' });
   }
@@ -106,12 +119,12 @@ export class WebConversationBridge {
     this.runtime.onMessage?.addListener(listener);
     return () => this.runtime.onMessage?.removeListener(listener);
   }
-  onThreadReturnProbe(callback: (threadId: string) => boolean): () => void {
+  onThreadReturnProbe(callback: (threadId: string, roundId?: string) => boolean): () => void {
     const listener = (message: unknown, _sender?: unknown, sendResponse?: (response: unknown) => void) => {
       if (!message || typeof message !== 'object') return false;
-      const value = message as { type?: unknown; threadId?: unknown };
+      const value = message as { type?: unknown; threadId?: unknown; roundId?: unknown };
       if (value.type !== 'pointask:probe-thread-return' || typeof value.threadId !== 'string') return false;
-      sendResponse?.({ ready: callback(value.threadId) });
+      sendResponse?.({ ready: callback(value.threadId, typeof value.roundId === 'string' ? value.roundId : undefined) });
       return true;
     };
     this.runtime.onMessage?.addListener(listener);
@@ -147,7 +160,7 @@ export class WebConversationBridge {
       if (!message || typeof message !== 'object') return false;
       const value = message as { type?: unknown; record?: PendingAssociation; attemptId?: unknown; promptHash?: unknown };
       if (value.type !== 'pointask:execute-pending-send' || !value.record || typeof value.attemptId !== 'string' ||
-        typeof value.promptHash !== 'string' || value.record.pendingThread.id !== value.record.localThread.id ||
+        typeof value.promptHash !== 'string' || (value.record.pendingThread.threadId || value.record.pendingThread.id) !== value.record.localThread.id ||
         value.record.pendingThread.promptHash !== value.promptHash) return false;
       void callback(value.record, value.attemptId, value.promptHash).then(
         (result) => sendResponse?.({ ...result, attemptId: value.attemptId }),

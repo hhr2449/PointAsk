@@ -205,6 +205,87 @@ describe('multi-turn prompt and thread flow', () => {
 });
 
 describe('conversation association conflicts and restoration', () => {
+  it('stages a completed Workspace round once and clears only its temporary answer after attachment', () => {
+    const coordinator = new PendingAssociationCoordinator(() => new Date(timestamp));
+    const value = { ...pending('workspace-stage'), threadId: 'workspace-stage', roundId: 'q1', answerMode: 'workspace' as const,
+      promptHash: 'stage-hash', status: 'answer_ready' as const, targetConversationUrl: 'https://chatgpt.com/c/shared' };
+    const local: LocalThread = { ...attachedThread('workspace-stage'), answerMode: 'workspace', status: 'answer_ready',
+      messages: [{ id: 'q1', role: 'user', content: [{ type: 'text', content: '第一问' }], attachedManually: false, createdAt: timestamp }],
+      rounds: [{ id: 'q1', pendingId: value.id, promptHash: 'stage-hash', assistantFingerprintsBefore: [], status: 'answer_ready',
+        persistenceStatus: 'not_captured', createdAt: timestamp, updatedAt: timestamp }] };
+    coordinator.create(value, 1, local); coordinator.markTargetOpened(value.id, 20, 'https://chatgpt.com/c/shared');
+    const locator = { conversationUrl: 'https://chatgpt.com/c/shared', conversationKey: 'https://chatgpt.com/c/shared', messageFingerprint: 'answer-q1' };
+    const first = coordinator.stageRoundAnswer(value.id, 20, 'q1', 'stage-hash', 'https://chatgpt.com/c/shared', false,
+      [{ type: 'text', content: '暂存回答' }], locator)!;
+    const second = coordinator.stageRoundAnswer(value.id, 20, 'q1', 'stage-hash', 'https://chatgpt.com/c/shared', false,
+      [{ type: 'text', content: '不应覆盖' }], locator)!;
+    expect(second.localThread.rounds?.[0]).toMatchObject({ persistenceStatus: 'staged', stagedAnswer: [{ type: 'text', content: '暂存回答' }] });
+    expect(second.localThread.messages).toHaveLength(1);
+    const attached = coordinator.attachRounds(value.id, 20, [{ roundId: 'q1', richContent: first.localThread.rounds![0]!.stagedAnswer!,
+      answerSource: locator }], 'https://chatgpt.com/c/shared')!;
+    expect(attached.localThread.rounds?.[0]).toMatchObject({ persistenceStatus: 'attached' });
+    expect(attached.localThread.rounds?.[0]?.stagedAnswer).toBeUndefined();
+    expect(attached.localThread.messages.filter((message) => message.role === 'assistant')).toHaveLength(1);
+  });
+
+  it('keeps staged answers isolated between two PA threads in one Workspace', () => {
+    const coordinator = new PendingAssociationCoordinator(() => new Date(timestamp));
+    for (const [id, roundId] of [['stage-one', 'q-one'], ['stage-two', 'q-two']] as const) {
+      const value = { ...pending(id), threadId: id, roundId, answerMode: 'workspace' as const, workspaceId: 'shared',
+        promptHash: `hash-${id}`, status: 'answer_ready' as const, targetConversationUrl: 'https://chatgpt.com/c/shared' };
+      const local: LocalThread = { ...attachedThread(id), answerMode: 'workspace', workspaceId: 'shared', status: 'answer_ready',
+        messages: [{ id: roundId, role: 'user', content: [{ type: 'text', content: id }], attachedManually: false, createdAt: timestamp }],
+        rounds: [{ id: roundId, pendingId: id, promptHash: `hash-${id}`, assistantFingerprintsBefore: [], status: 'answer_ready',
+          persistenceStatus: 'not_captured', createdAt: timestamp, updatedAt: timestamp }] };
+      coordinator.create(value, id === 'stage-one' ? 1 : 2, local); coordinator.markTargetOpened(id, 20, 'https://chatgpt.com/c/shared');
+    }
+    const locator = { conversationUrl: 'https://chatgpt.com/c/shared', conversationKey: 'https://chatgpt.com/c/shared', messageFingerprint: 'answer-one' };
+    coordinator.stageRoundAnswer('stage-one', 20, 'q-one', 'hash-stage-one', 'https://chatgpt.com/c/shared', false,
+      [{ type: 'text', content: '只属于第一条线程' }], locator);
+    expect(coordinator.get('stage-one')?.localThread.rounds?.[0]?.persistenceStatus).toBe('staged');
+    expect(coordinator.get('stage-two')?.localThread.rounds?.[0]?.persistenceStatus).toBe('not_captured');
+    expect(coordinator.get('stage-two')?.localThread.rounds?.[0]?.stagedAnswer).toBeUndefined();
+  });
+
+  it('atomically attaches multiple reliable rounds by roundId and remains idempotent', () => {
+    const coordinator = new PendingAssociationCoordinator(() => new Date(timestamp));
+    const workspacePending = { ...pending('workspace-batch'), threadId: 'workspace-batch', roundId: 'q3',
+      answerMode: 'workspace' as const, promptHash: 'prompt-3', status: 'answer_ready' as const };
+    const local: LocalThread = {
+      ...attachedThread('workspace-batch'), answerMode: 'workspace', status: 'answer_ready',
+      messages: [
+        { id: 'q1', role: 'user', content: [{ type: 'text', content: '第一问' }], attachedManually: false, createdAt: timestamp },
+        { id: 'q2', role: 'user', content: [{ type: 'text', content: '第二问' }], attachedManually: false, createdAt: timestamp },
+        { id: 'q3', role: 'user', content: [{ type: 'text', content: '第三问' }], attachedManually: false, createdAt: timestamp },
+      ],
+      rounds: ['q1', 'q2', 'q3'].map((id, index) => ({ id, pendingId: `p${index + 1}`, promptHash: `prompt-${index + 1}`,
+        assistantFingerprintsBefore: [], status: 'answer_ready' as const, persistenceStatus: 'staged' as const,
+        stagedAnswer: [{ type: 'text' as const, content: id === 'q1' ? '第一答' : id === 'q2' ? '第二答' : '第三答' }],
+        answerSource: { conversationUrl: 'https://chatgpt.com/c/shared', conversationKey: 'https://chatgpt.com/c/shared', messageFingerprint: `answer-${id}` },
+        createdAt: timestamp, updatedAt: timestamp })),
+    };
+    coordinator.create(workspacePending, 1, local);
+    coordinator.markTargetOpened(workspacePending.id, 20, 'https://chatgpt.com/c/shared');
+    const source = (id: string) => ({ conversationUrl: 'https://chatgpt.com/c/shared', conversationKey: 'https://chatgpt.com/c/shared',
+      messageFingerprint: `answer-${id}` });
+    const first = coordinator.attachRounds(workspacePending.id, 20, [
+      { roundId: 'q1', richContent: [{ type: 'text', content: '第一答' }], answerSource: source('q1') },
+      { roundId: 'q2', richContent: [{ type: 'text', content: '第二答' }], answerSource: source('q2') },
+      { roundId: 'q2', richContent: [{ type: 'text', content: '第二答' }], answerSource: source('q2') },
+    ], 'https://chatgpt.com/c/shared')!;
+    expect(first.localThread.messages.map((message) => `${message.role}:${message.id}`)).toEqual([
+      'user:q1', 'assistant:pointask-answer-q1', 'user:q2', 'assistant:pointask-answer-q2', 'user:q3',
+    ]);
+    expect(first.localThread.rounds?.map((round) => round.status)).toEqual(['attached', 'attached', 'answer_ready']);
+    expect(first.localThread.rounds?.map((round) => round.persistenceStatus)).toEqual(['attached', 'attached', 'staged']);
+    expect(first.localThread.rounds?.find((round) => round.id === 'q3')?.stagedAnswer).toEqual([{ type: 'text', content: '第三答' }]);
+    const second = coordinator.attachRounds(workspacePending.id, 20, [
+      { roundId: 'q1', richContent: [{ type: 'text', content: '不应重复' }], answerSource: source('q1') },
+      { roundId: 'q2', richContent: [{ type: 'text', content: '不应重复' }], answerSource: source('q2') },
+    ], 'https://chatgpt.com/c/shared')!;
+    expect(second.localThread.messages).toEqual(first.localThread.messages);
+  });
+
   it('keeps two Workspace pending threads isolated on their shared target tab', () => {
     const coordinator = new PendingAssociationCoordinator(() => new Date(timestamp));
     for (const [id, displayId] of [['workspace-one', 'PA-001'], ['workspace-two', 'PA-002']] as const) {

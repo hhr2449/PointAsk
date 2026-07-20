@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { PendingAssociation } from '../src/bridge/runtime-messages';
 import { WorkspaceControlCard } from '../src/components/workspace-control-card';
 import { deriveWorkspaceControlState } from '../src/components/workspace-control-state';
-import { defaultSelectedRoundIds } from '../src/components/round-selection-state';
+import { defaultSelectedRoundIds, validSelectedRoundIds } from '../src/components/round-selection-state';
 import { PendingThreadManager } from '../src/bridge/pending-thread-manager';
 import { PendingBannerManager } from '../src/content/pending-banner-manager';
 import { WebConversationBridge } from '../src/bridge/web-conversation-bridge';
@@ -42,16 +42,33 @@ describe('Workspace control state', () => {
       deriveWorkspaceControlState({ record: record('failed'), reliable: false, sending: false, selectionLength: 0, returnFailed: false }),
       deriveWorkspaceControlState({ record: record('answer_attached'), reliable: false, sending: false, selectionLength: 0, returnFailed: true }),
     ];
-    expect(states.map((state) => state.primary)).toEqual(['send', undefined, 'attach_latest_return', 'attach_selection_return', undefined, 'retry', 'retry_return']);
+    expect(states.map((state) => state.primary)).toEqual(['send', undefined, 'attach_default_return', 'attach_selection_return', undefined, 'retry', 'retry_return']);
     expect(states[1]?.label).toBe('正在发送');
   });
 
-  it('defaults round selection to the latest unattached round and never an attached round', () => {
+  it('defaults round selection to every reliable unattached round and never an attached or ambiguous round', () => {
     const selected = defaultSelectedRoundIds([
-      { id: 'q1', index: 1, question: '一', attached: true, latest: false },
-      { id: 'q2', index: 2, question: '二', attached: false, latest: true },
+      { id: 'q1', index: 1, question: '一', attached: true, latest: false, reliable: false },
+      { id: 'q2', index: 2, question: '二', attached: false, latest: false, reliable: true },
+      { id: 'q3', index: 3, question: '三', attached: false, latest: false, reliable: false },
+      { id: 'q4', index: 4, question: '四', attached: false, latest: true, reliable: true },
+      { id: 'q5', index: 5, question: '五', attached: false, latest: false, reliable: true, persistenceStatus: 'capture_failed' },
     ]);
-    expect([...selected]).toEqual(['q2']);
+    expect([...selected]).toEqual(['q2', 'q4']);
+    expect([...validSelectedRoundIds([
+      { id: 'q2', index: 2, question: '二', attached: false, latest: false, reliable: false },
+      { id: 'q4', index: 4, question: '四', attached: true, latest: true, reliable: false },
+    ], selected)]).toEqual([]);
+  });
+
+  it('labels single, all, and incremental attachment actions from round counts', () => {
+    const value = record('answer_ready');
+    const derive = (attachableRoundCount: number, totalRoundCount: number, attachedRoundCount: number) =>
+      deriveWorkspaceControlState({ record: value, candidate, reliable: true, sending: false, selectionLength: 0,
+        returnFailed: false, attachableRoundCount, totalRoundCount, attachedRoundCount }).primaryLabel;
+    expect(derive(1, 1, 0)).toBe('附加本轮并返回');
+    expect(derive(3, 3, 0)).toBe('附加全部 3 轮并返回');
+    expect(derive(2, 3, 1)).toBe('附加新增 2 轮并返回');
   });
 
   it('creates a fresh pending and round id while preserving the stable thread id', () => {
@@ -67,13 +84,13 @@ describe('Workspace control card', () => {
   it('expands/collapses with complementary semantics and renders only the state action', async () => {
     const container = document.createElement('div'); const root = createRoot(container); const toggle = vi.fn();
     const value = record('answer_ready'); const state = deriveWorkspaceControlState({ record: value, candidate, reliable: true, sending: false, selectionLength: 0, returnFailed: false });
-    await act(() => root.render(<WorkspaceControlCard record={value} records={[value]} state={state} expanded busy={false}
+    await act(() => root.render(<WorkspaceControlCard record={value} records={[value]} rounds={[{ id: 'q1', index: 1, question: '问题', attached: false, latest: true, reliable: true }]} state={state} expanded busy={false}
       onToggleExpanded={toggle} onSwitch={vi.fn()} onPrimary={vi.fn()} onReturn={vi.fn()} onContinue={vi.fn().mockResolvedValue(true)}
       onAttachRounds={vi.fn().mockResolvedValue(true)} onClearSelection={vi.fn()} onAttachOnly={vi.fn()} onUnlink={vi.fn()} onCopyPrompt={vi.fn()} />));
     expect(container.querySelector('aside')?.getAttribute('role')).toBe('complementary');
     expect(container.querySelector('[aria-expanded="true"]')).not.toBeNull();
     expect([...container.querySelectorAll('button')].filter((button) => button.classList.contains('pointask-primary')).map((button) => button.textContent))
-      .toEqual(['附加最新回答并返回']);
+      .toEqual(['附加本轮并返回']);
     await act(() => (container.querySelector('.pointask-control-toggle') as HTMLButtonElement).click()); expect(toggle).toHaveBeenCalledOnce();
     await act(() => root.unmount());
   });
@@ -81,14 +98,14 @@ describe('Workspace control card', () => {
   it('supports Enter submit, Shift+Enter newline intent, Escape cancel, and preserves failed input', async () => {
     const container = document.createElement('div'); const root = createRoot(container); const onContinue = vi.fn().mockResolvedValue(false);
     const value = record('answer_attached'); const state = deriveWorkspaceControlState({ record: value, reliable: false, sending: false, selectionLength: 0, returnFailed: false });
-    await act(() => root.render(<WorkspaceControlCard record={value} records={[value]} state={state} expanded busy={false}
+    await act(() => root.render(<WorkspaceControlCard record={value} records={[value]} rounds={[{ id: 'q1', index: 1, question: '问题', attached: true, latest: true, reliable: false }]} state={state} expanded busy={false}
       onToggleExpanded={vi.fn()} onSwitch={vi.fn()} onPrimary={vi.fn()} onReturn={vi.fn()} onContinue={onContinue}
       onAttachRounds={vi.fn().mockResolvedValue(true)} onClearSelection={vi.fn()} onAttachOnly={vi.fn()} onUnlink={vi.fn()} onCopyPrompt={vi.fn()} />));
     const continueButton = [...container.querySelectorAll('button')].find((button) => button.textContent === '继续追问')!;
     await act(() => continueButton.click()); const textarea = container.querySelector('textarea')!;
     await act(() => { const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!; setter.call(textarea, '保留的问题'); textarea.dispatchEvent(new Event('input', { bubbles: true })); });
     await act(async () => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
-    expect(onContinue).toHaveBeenCalledWith('保留的问题'); expect(container.querySelector('textarea')?.value).toBe('保留的问题');
+    expect(onContinue).toHaveBeenCalledWith('保留的问题', false); expect(container.querySelector('textarea')?.value).toBe('保留的问题');
     expect(container.textContent).toContain('输入内容已保留');
     await act(() => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
     expect(container.querySelector('textarea')).toBeNull(); await act(() => root.unmount());
@@ -98,7 +115,7 @@ describe('Workspace control card', () => {
     const container = document.createElement('div'); const root = createRoot(container);
     const first = record('answer_attached');
     const state = deriveWorkspaceControlState({ record: first, reliable: false, sending: false, selectionLength: 0, returnFailed: false });
-    const props = { records: [first], state, expanded: true, busy: false, onToggleExpanded: vi.fn(), onSwitch: vi.fn(), onPrimary: vi.fn(),
+    const props = { records: [first], rounds: [{ id: 'q1', index: 1, question: '问题', attached: true, latest: true, reliable: false }], state, expanded: true, busy: false, onToggleExpanded: vi.fn(), onSwitch: vi.fn(), onPrimary: vi.fn(),
       onReturn: vi.fn(), onContinue: vi.fn().mockResolvedValue(false), onAttachRounds: vi.fn().mockResolvedValue(true), onClearSelection: vi.fn(),
       onAttachOnly: vi.fn(), onUnlink: vi.fn(), onCopyPrompt: vi.fn() };
     await act(() => root.render(<WorkspaceControlCard record={first} {...props} />));
@@ -110,8 +127,34 @@ describe('Workspace control card', () => {
       localThread: { ...first.localThread, messages: [...first.localThread.messages, {
         id: 'a1', role: 'assistant' as const, content: [{ type: 'text' as const, content: '第一轮回答' }], attachedManually: true, createdAt: timestamp,
       }] } };
-    await act(() => root.render(<WorkspaceControlCard record={next} {...props} records={[next]} />));
+    await act(() => root.render(<WorkspaceControlCard record={next} {...props} records={[next]} rounds={[...props.rounds,
+      { id: 'q2', index: 2, question: '继续', attached: false, latest: true, reliable: false }]} />));
     expect(container.querySelector('textarea')?.value).toBe('不能丢失的继续追问');
+    await act(() => root.unmount());
+  });
+
+  it('keeps the draft and offers retry staging or continue without staging after capture failure', async () => {
+    const container = document.createElement('div'); const root = createRoot(container);
+    const value = record('answer_ready');
+    const state = deriveWorkspaceControlState({ record: value, candidate, reliable: true, sending: false, selectionLength: 0,
+      returnFailed: false, canContinue: true });
+    const onContinue = vi.fn().mockResolvedValueOnce({ ok: false, captureFailed: true, error: '当前回答暂存失败' }).mockResolvedValue({ ok: true });
+    await act(() => root.render(<WorkspaceControlCard record={value} records={[value]} rounds={[{ id: 'q1', index: 1, question: '问题',
+      attached: false, latest: true, reliable: false, persistenceStatus: 'capture_failed' }]} state={state} expanded busy={false}
+      onToggleExpanded={vi.fn()} onSwitch={vi.fn()} onPrimary={vi.fn()} onReturn={vi.fn()} onContinue={onContinue}
+      onAttachRounds={vi.fn().mockResolvedValue(true)} onClearSelection={vi.fn()} onAttachOnly={vi.fn()} onUnlink={vi.fn()} onCopyPrompt={vi.fn()} />));
+    await act(() => [...container.querySelectorAll('button')].find((button) => button.textContent === '继续追问')!.click());
+    const textarea = container.querySelector('textarea')!;
+    await act(() => { const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+      setter.call(textarea, '保留输入'); textarea.dispatchEvent(new Event('input', { bubbles: true })); });
+    await act(async () => { [...container.querySelectorAll('button')].find((button) => button.textContent === '发送追问')!.click(); await Promise.resolve(); });
+    expect(container.textContent).toContain('当前回答暂存失败');
+    expect(container.textContent).toContain('重试暂存');
+    expect(container.textContent).toContain('继续但不暂存');
+    expect(container.querySelector('textarea')?.value).toBe('保留输入');
+    await act(async () => { [...container.querySelectorAll('button')].find((button) => button.textContent === '继续但不暂存')!.click(); await Promise.resolve(); });
+    expect(onContinue).toHaveBeenLastCalledWith('保留输入', true);
+    expect(container.querySelector('textarea')).toBeNull();
     await act(() => root.unmount());
   });
 
@@ -120,12 +163,61 @@ describe('Workspace control card', () => {
     const first = record(); const second = { ...record(), pendingThread: { ...record().pendingThread, id: 'pending-2' },
       localThread: { ...record().localThread, id: 'thread-2', displayId: 'PA-004' } };
     const state = deriveWorkspaceControlState({ record: first, reliable: false, sending: false, selectionLength: 0, returnFailed: false });
-    await act(() => root.render(<WorkspaceControlCard record={first} records={[first, second]} state={state} expanded busy={false}
+    await act(() => root.render(<WorkspaceControlCard record={first} records={[first, second]} rounds={[{ id: 'q1', index: 1, question: '问题', attached: false, latest: true, reliable: false }]} state={state} expanded busy={false}
       onToggleExpanded={vi.fn()} onSwitch={onSwitch} onPrimary={vi.fn()} onReturn={vi.fn()} onContinue={vi.fn().mockResolvedValue(true)}
       onAttachRounds={vi.fn().mockResolvedValue(true)} onClearSelection={vi.fn()} onAttachOnly={vi.fn()} onUnlink={vi.fn()} onCopyPrompt={vi.fn()} />));
     const select = container.querySelector('select')!;
     await act(() => { select.value = 'pending-2'; select.dispatchEvent(new Event('change', { bubbles: true })); });
     expect(onSwitch).toHaveBeenCalledWith('pending-2'); await act(() => root.unmount());
+  });
+
+  it('selects all reliable rounds by default and allows excluding one round', async () => {
+    const container = document.createElement('div'); const root = createRoot(container);
+    const value = record('answer_ready');
+    const state = deriveWorkspaceControlState({ record: value, candidate, reliable: true, sending: false, selectionLength: 0,
+      returnFailed: false, attachableRoundCount: 2, totalRoundCount: 3, attachedRoundCount: 1 });
+    const onAttachRounds = vi.fn().mockResolvedValue(true);
+    await act(() => root.render(<WorkspaceControlCard record={value} records={[value]} rounds={[
+      { id: 'q1', index: 1, question: '已附加', attached: true, latest: false, reliable: false },
+      { id: 'q2', index: 2, question: '第二问', attached: false, latest: false, reliable: true },
+      { id: 'q3', index: 3, question: '第三问', attached: false, latest: true, reliable: true },
+    ]} state={state} expanded busy={false} onToggleExpanded={vi.fn()} onSwitch={vi.fn()} onPrimary={vi.fn()}
+      onReturn={vi.fn()} onContinue={vi.fn().mockResolvedValue(true)} onAttachRounds={onAttachRounds}
+      onClearSelection={vi.fn()} onAttachOnly={vi.fn()} onUnlink={vi.fn()} onCopyPrompt={vi.fn()} />));
+    await act(() => [...container.querySelectorAll('button')].find((button) => button.textContent === '选择附加内容')!.click());
+    const checkboxes = [...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
+    expect(checkboxes.map((checkbox) => [checkbox.disabled, checkbox.checked])).toEqual([[true, true], [false, true], [false, true]]);
+    await act(() => checkboxes[1]!.click());
+    await act(async () => {
+      [...container.querySelectorAll('button')].find((button) => button.textContent === '附加所选并返回')!.click();
+      await Promise.resolve();
+    });
+    expect(onAttachRounds).toHaveBeenCalledWith(['q3']);
+    await act(() => root.unmount());
+  });
+
+  it('removes a selected round when it becomes unavailable and does not revive stale selection state', async () => {
+    const container = document.createElement('div'); const root = createRoot(container); const value = record('answer_ready');
+    const state = deriveWorkspaceControlState({ record: value, candidate, reliable: true, sending: false, selectionLength: 0,
+      returnFailed: false, attachableRoundCount: 1, totalRoundCount: 2, attachedRoundCount: 0 });
+    const onAttachRounds = vi.fn().mockResolvedValue(true);
+    const props = { record: value, records: [value], state, expanded: true, busy: false, onToggleExpanded: vi.fn(), onSwitch: vi.fn(),
+      onPrimary: vi.fn(), onReturn: vi.fn(), onContinue: vi.fn().mockResolvedValue(true), onAttachRounds, onClearSelection: vi.fn(),
+      onAttachOnly: vi.fn(), onUnlink: vi.fn(), onCopyPrompt: vi.fn() };
+    const reliableRounds = [
+      { id: 'q1', index: 1, question: '第一问', attached: false, latest: false, reliable: false },
+      { id: 'q2', index: 2, question: '第二问', attached: false, latest: true, reliable: true },
+    ];
+    await act(() => root.render(<WorkspaceControlCard {...props} rounds={reliableRounds} />));
+    await act(() => [...container.querySelectorAll('button')].find((button) => button.textContent === '选择附加内容')!.click());
+    expect((container.querySelector('.pointask-primary') as HTMLButtonElement).disabled).toBe(false);
+    const unavailableRounds = reliableRounds.map((round) => round.id === 'q2' ? { ...round, reliable: false } : round);
+    await act(() => root.render(<WorkspaceControlCard {...props} rounds={unavailableRounds} />));
+    expect((container.querySelector('.pointask-primary') as HTMLButtonElement).disabled).toBe(true);
+    await act(() => root.render(<WorkspaceControlCard {...props} rounds={reliableRounds} />));
+    expect((container.querySelector('.pointask-primary') as HTMLButtonElement).disabled).toBe(true);
+    expect(onAttachRounds).not.toHaveBeenCalled();
+    await act(() => root.unmount());
   });
 
   it('retries only return after an attachment has already succeeded', async () => {

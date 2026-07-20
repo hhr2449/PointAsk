@@ -1,4 +1,5 @@
 import type { LocalThread } from '../shared/local-thread';
+import type { PendingThread } from '../bridge/pending-thread-manager';
 import { STORAGE_KEYS, STORAGE_SCHEMA_VERSION } from './storage-schema';
 import { migrateStorage } from './migration';
 import { withStorageLock, type StorageDriver } from './storage-driver';
@@ -19,6 +20,17 @@ export class ThreadStore {
   }
   async upsert(thread: LocalThread): Promise<void> {
     await this.mutate((threads) => [...threads.filter((item) => item.id !== thread.id), thread]);
+  }
+  async upsertAssociation(thread: LocalThread, pending: PendingThread): Promise<void> {
+    await withStorageLock('association', async () => {
+      const raw = await this.driver.get([STORAGE_KEYS.threads, STORAGE_KEYS.pendingThreads, STORAGE_KEYS.schemaVersion]);
+      const schema = migrateStorage(raw); const threadId = pending.threadId || pending.id;
+      await this.driver.set({
+        [STORAGE_KEYS.threads]: [...schema.threads.filter((item) => item.id !== thread.id), thread],
+        [STORAGE_KEYS.pendingThreads]: [...schema.pendingThreads.filter((item) => (item.threadId || item.id) !== threadId), pending],
+        [STORAGE_KEYS.schemaVersion]: STORAGE_SCHEMA_VERSION,
+      });
+    });
   }
   async delete(id: string): Promise<boolean> {
     let deleted = false;
