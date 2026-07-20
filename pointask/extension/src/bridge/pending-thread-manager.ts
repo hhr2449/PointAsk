@@ -16,7 +16,7 @@ export interface PendingThread {
   question: string;
   generatedPrompt: string;
   promptMode: PromptMode;
-  status: 'prompt_ready' | 'waiting_for_submission' | 'generating' | 'answer_ready' | 'waiting_for_answer' | 'answer_attached' | 'failed';
+  status: 'prompt_ready' | 'waiting_for_submission' | 'submitting' | 'submission_unknown' | 'generating' | 'answer_ready' | 'waiting_for_answer' | 'answer_attached' | 'failed';
   createdAt: string;
   updatedAt: string;
   targetConversationUrl?: string;
@@ -32,6 +32,10 @@ export interface PendingThread {
   viewAnchor?: ViewAnchor;
   submittedPromptHash?: string;
   submittedAt?: string;
+  /** Monotonic revision shared with the owning LocalThread. */
+  revision?: number;
+  /** Stable identity for the async operation that created this pending round. */
+  operationId?: string;
 }
 
 export interface CreatePendingThreadInput {
@@ -89,6 +93,8 @@ export class PendingThreadManager {
       roundId: input.roundId,
       promptHash: input.promptHash ?? stableTextHash(generatedPrompt),
       assistantFingerprintsBefore: input.assistantFingerprintsBefore ?? [],
+      revision: 1,
+      operationId: input.roundId ? `pointask-operation-${input.roundId}` : undefined,
       richSelection: input.richSelection,
       viewAnchor: input.viewAnchor,
     };
@@ -100,18 +106,18 @@ export class PendingThreadManager {
   markWaitingForAnswer(id: string): PendingThread | null {
     const thread = this.get(id);
     if (!thread) return null;
-    const updated = { ...thread, status: 'waiting_for_answer' as const, updatedAt: this.now().toISOString() };
+    const updated = { ...thread, status: 'waiting_for_answer' as const, updatedAt: this.now().toISOString(), revision: (thread.revision ?? 0) + 1 };
     this.threads.set(thread.id, updated);
     return updated;
   }
   markWaitingForSubmission(id: string): PendingThread | null {
     const thread = this.get(id); if (!thread) return null;
-    const updated = { ...thread, status: 'waiting_for_submission' as const, updatedAt: this.now().toISOString() };
+    const updated = { ...thread, status: 'waiting_for_submission' as const, updatedAt: this.now().toISOString(), revision: (thread.revision ?? 0) + 1 };
     this.threads.set(thread.id, updated); return updated;
   }
   markFailed(id: string): PendingThread | null {
     const thread = this.get(id); if (!thread) return null;
-    const updated = { ...thread, status: 'failed' as const, updatedAt: this.now().toISOString() };
+    const updated = { ...thread, status: 'failed' as const, updatedAt: this.now().toISOString(), revision: (thread.revision ?? 0) + 1 };
     this.threads.set(thread.id, updated); return updated;
   }
 
@@ -132,6 +138,8 @@ export class PendingThreadManager {
       assistantFingerprintsBefore: assistantFingerprintsBefore ?? thread.assistantFingerprintsBefore,
       promptMode,
       status: 'prompt_ready',
+      revision: (thread.revision ?? 0) + 1,
+      operationId: roundId ? `pointask-operation-${roundId}` : undefined,
       updatedAt: this.now().toISOString(),
     };
     this.threads.delete(thread.id);
@@ -161,13 +169,13 @@ export class PendingThreadManager {
   updateQuestion(id: string, question: string): PendingThread | null {
     const thread = this.get(id);
     if (!thread || !question.trim()) return null;
-    const updated = { ...thread, question: question.trim(), updatedAt: this.now().toISOString() };
+    const updated = { ...thread, question: question.trim(), updatedAt: this.now().toISOString(), revision: (thread.revision ?? 0) + 1 };
     this.threads.set(thread.id, updated);
     return updated;
   }
   updateRouting(id: string, answerMode: AnswerMode, workspaceId?: string, targetConversationUrl?: string): PendingThread | null {
     const thread = this.get(id); if (!thread) return null;
-    const updated = { ...thread, answerMode, workspaceId, targetConversationUrl, updatedAt: this.now().toISOString() };
+    const updated = { ...thread, answerMode, workspaceId, targetConversationUrl, updatedAt: this.now().toISOString(), revision: (thread.revision ?? 0) + 1 };
     this.threads.set(thread.id, updated); return updated;
   }
 }

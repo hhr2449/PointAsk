@@ -146,6 +146,12 @@ export class WebConversationBridge {
   async reservePromptSubmission(pendingThreadId: string, promptHash: string, targetUrl = window.location.href): Promise<PendingAssociation> {
     return this.send({ type: 'pointask:reserve-prompt-submission', pendingThreadId, promptHash, targetUrl });
   }
+  async markSubmissionUnknown(pendingThreadId: string, promptHash: string, targetUrl = window.location.href): Promise<PendingAssociation> {
+    return this.send({ type: 'pointask:mark-submission-unknown', pendingThreadId, promptHash, targetUrl });
+  }
+  async markSubmissionStarted(pendingThreadId: string, promptHash: string, targetUrl = window.location.href): Promise<PendingAssociation> {
+    return this.send({ type: 'pointask:mark-submission-started', pendingThreadId, promptHash, targetUrl });
+  }
   async releasePromptSubmission(pendingThreadId: string, promptHash: string): Promise<PendingAssociation> {
     return this.send({ type: 'pointask:release-prompt-submission', pendingThreadId, promptHash });
   }
@@ -159,7 +165,7 @@ export class WebConversationBridge {
 
   onExecutePendingSend(callback: (
     record: PendingAssociation, attemptId: string, promptHash: string,
-  ) => Promise<{ ok: boolean; error?: string }>): () => void {
+  ) => Promise<{ ok: boolean; submissionUnknown?: boolean; error?: string }>): () => void {
     const listener = (message: unknown, _sender?: unknown, sendResponse?: (response: unknown) => void) => {
       if (!message || typeof message !== 'object') return false;
       const value = message as { type?: unknown; record?: PendingAssociation; attemptId?: unknown; promptHash?: unknown };

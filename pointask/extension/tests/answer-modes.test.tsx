@@ -101,6 +101,8 @@ describe('mode navigation behavior', () => {
       if (message.type === 'pointask:associate-target-page' && record) record = { ...record, targetTabId: 1, targetConversationUrl: anchor.sourcePageUrl,
         associationStatus: 'associated', pendingThread: { ...record.pendingThread, targetConversationUrl: anchor.sourcePageUrl, targetTabId: 1 },
         localThread: { ...record.localThread, targetConversationUrl: anchor.sourcePageUrl, status: 'waiting_for_submission' } };
+      if (message.type === 'pointask:mark-submission-started' && record) record = { ...record,
+        pendingThread: { ...record.pendingThread, status: 'submitting' }, localThread: { ...record.localThread, status: 'submitting' } };
       if (message.type === 'pointask:reserve-prompt-submission' && record) record = { ...record,
         pendingThread: { ...record.pendingThread, submittedPromptHash: message.promptHash, status: 'waiting_for_answer' },
         localThread: { ...record.localThread, status: 'waiting_for_answer' } };
@@ -109,6 +111,7 @@ describe('mode navigation behavior', () => {
     const adapter = {
       getConversationKey: () => anchor.conversationKey, fillComposer: vi.fn().mockReturnValue(true), canSubmitComposer: vi.fn().mockReturnValue(true),
       submitComposer: vi.fn().mockReturnValue(true), getAssistantMessageFingerprints: () => [], getScrollContainer: () => window,
+      hasSubmittedPrompt: vi.fn().mockReturnValue(true), findCandidateAnswer: vi.fn().mockReturnValue(null),
     } as unknown as SiteAdapter;
     const manager = new InlineThreadManager(pendingManager, new ClipboardManager(undefined, () => false), new WebConversationBridge(runtime),
       () => ({ render: vi.fn(), unmount: vi.fn() }) as unknown as Root, () => new Date(now), undefined, undefined, undefined, undefined, adapter);

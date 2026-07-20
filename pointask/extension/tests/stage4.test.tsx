@@ -52,6 +52,8 @@ describe('runtime validation', () => {
     expect(isPointAskRuntimeMessage({ type: 'pointask:stage-round-answer', pendingThreadId: 'id', roundId: 'round-1', promptHash: 'hash',
       targetUrl: 'https://chatgpt.com/c/workspace', captureFailed: false, richContent: attachment.richContent,
       answerSource: attachment.answerSource })).toBe(true);
+    expect(isPointAskRuntimeMessage({ type: 'pointask:mark-submission-unknown', pendingThreadId: 'id', promptHash: 'hash',
+      targetUrl: 'https://chatgpt.com/c/workspace' })).toBe(true);
     expect(isPointAskRuntimeMessage({ type: 'pointask:attach-rounds', pendingThreadId: 'id', rounds: [{ ...attachment, roundId: '' }],
       targetUrl: 'https://chatgpt.com/c/workspace' })).toBe(false);
     expect(isPointAskRuntimeMessage({
@@ -86,6 +88,51 @@ describe('pending association state', () => {
     expect(released?.localThread.status).toBe('waiting_for_submission');
     expect(released?.pendingThread.submittedPromptHash).toBeUndefined();
     expect(coordinator.reserveSubmission(record.pendingThread.id, 2, 'hash-retry', 'https://chatgpt.com/c/target')).not.toBeNull();
+  });
+
+  it('keeps an uncertain click non-retryable and reconciles it when the matching answer appears', () => {
+    const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
+    const value = { ...pending('submission-unknown'), promptHash: 'unknown-hash', answerMode: 'workspace' as const };
+    coordinator.create(value, 1); coordinator.markTargetOpened(value.id, 2, 'https://chatgpt.com/c/workspace');
+    const unknown = coordinator.markSubmissionUnknown(value.id, 2, 'unknown-hash', 'https://chatgpt.com/c/workspace')!;
+    expect(unknown.pendingThread.status).toBe('submission_unknown');
+    expect(unknown.localThread.status).toBe('submission_unknown');
+    expect(coordinator.markTargetOpened(value.id, 2, 'https://chatgpt.com/c/workspace')?.pendingThread.status).toBe('submission_unknown');
+    const recovered = coordinator.markCandidate(value.id, 2, 'answer-fingerprint', false)!;
+    expect(recovered.pendingThread).toMatchObject({ status: 'answer_ready', submittedPromptHash: 'unknown-hash' });
+    expect(recovered.localThread.status).toBe('answer_ready');
+    expect(coordinator.reserveSubmission(value.id, 2, 'unknown-hash', 'https://chatgpt.com/c/workspace')).toBeNull();
+  });
+
+  it('does not let a late send failure overwrite answer_ready', () => {
+    const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
+    const value = { ...pending('late-failure'), promptHash: 'late-hash', answerMode: 'workspace' as const };
+    coordinator.create(value, 1); coordinator.markTargetOpened(value.id, 2, 'https://chatgpt.com/c/workspace');
+    const ready = coordinator.markCandidate(value.id, 2, 'answer-ready', false)!;
+    const afterFailure = coordinator.markSendFailed(value.id)!;
+    expect(afterFailure.revision).toBe(ready.revision);
+    expect(afterFailure.pendingThread.status).toBe('answer_ready');
+    expect(afterFailure.localThread.status).toBe('answer_ready');
+  });
+
+  it('rejects an older association revision after a newer answer snapshot is persisted', async () => {
+    const driver = new MemoryStorageDriver(); const threadStore = new ThreadStore(driver); const pendingStore = new PendingStore(driver);
+    const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
+    const value = { ...pending('revision-cas'), promptHash: 'revision-hash', answerMode: 'workspace' as const };
+    coordinator.create(value, 1); const older = coordinator.markTargetOpened(value.id, 2, 'https://chatgpt.com/c/workspace')!;
+    const newer = coordinator.markCandidate(value.id, 2, 'answer-ready', false)!;
+    expect(await threadStore.upsertAssociation(newer.localThread, newer.pendingThread)).toBe(true);
+    expect(await threadStore.upsertAssociation(older.localThread, older.pendingThread)).toBe(false);
+    expect((await threadStore.get(value.id))?.status).toBe('answer_ready');
+    expect((await pendingStore.get(value.id))?.status).toBe('answer_ready');
+  });
+
+  it('never associates a Workspace target with its source conversation', () => {
+    const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
+    const value = { ...pending('workspace-role'), answerMode: 'workspace' as const, targetConversationUrl: 'https://chatgpt.com/' };
+    coordinator.create(value, 1);
+    expect(coordinator.markTargetOpened(value.id, 2, value.sourceConversationKey)).toBeNull();
+    expect(coordinator.associate(value.id, 2, value.sourceConversationKey)).toBeNull();
   });
 
   it('keeps multiple pending threads isolated by ID and tab association', () => {
@@ -325,6 +372,26 @@ describe('service worker routing', () => {
     expect(result).toEqual({ ok: true, data: [] });
   });
 
+  it('restores completed Workspace threads for the lightweight selector and permits confirmed Workspace deletion', async () => {
+    const driver = new MemoryStorageDriver(); const threadStore = new ThreadStore(driver); const pendingStore = new PendingStore(driver);
+    const value = { ...pending('workspace-completed'), threadId: 'workspace-completed', answerMode: 'workspace' as const,
+      targetConversationUrl: 'https://chatgpt.com/c/workspace' };
+    const seed = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
+    seed.create(value, 1); seed.markTargetOpened(value.id, 2, 'https://chatgpt.com/c/workspace');
+    const attached = seed.attachAnswer(value.id, 2, '已完成回答', 'https://chatgpt.com/c/workspace', false)!;
+    await threadStore.upsert(attached.localThread); await pendingStore.upsert(attached.pendingThread);
+    await pendingStore.delete(attached.pendingThread.id); // Simulate routing metadata expired before this feature existed.
+    const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T02:00:00.000Z'));
+    const deps = { coordinator, tabs: { create: vi.fn(), update: vi.fn(), sendMessage: vi.fn() }, threadStore, pendingStore };
+    const restored = await handleRuntimeMessage({ type: 'pointask:get-page-pending-threads', currentUrl: 'https://chatgpt.com/c/workspace' },
+      { tab: { id: 22, url: 'https://chatgpt.com/c/workspace' } }, deps);
+    expect(restored.data).toMatchObject([{ localThread: { id: 'workspace-completed', answerMode: 'workspace' } }]);
+    const deleted = await handleRuntimeMessage({ type: 'pointask:delete-thread-data', threadId: 'workspace-completed' },
+      { tab: { id: 22, url: 'https://chatgpt.com/c/workspace' } }, deps);
+    expect(deleted.ok).toBe(true); expect(await threadStore.get('workspace-completed')).toBeNull();
+    expect(await pendingStore.list()).toEqual([]);
+  });
+
   it('restores a continued Workspace round by pendingId after a service-worker restart', async () => {
     const driver = new MemoryStorageDriver(); const threadStore = new ThreadStore(driver); const pendingStore = new PendingStore(driver);
     const stableThreadId = 'workspace-stable-thread'; const nextPendingId = 'workspace-round-two';
@@ -504,11 +571,13 @@ describe('web bridge and pending banner', () => {
       pendingThread: pending(), sourceTabId: 1, targetTabId: 2,
       localThread: {
         id: pending().id,
+        displayId: pending().displayId,
+        answerMode: 'dedicated_branch' as const,
         anchor: pending().anchor,
         sourcePageUrl: pending().sourcePageUrl,
         sourceConversationKey: pending().sourceConversationKey,
         sourceMessageFingerprint: pending().sourceMessageFingerprint,
-        targetConversationUrl: 'https://chatgpt.com/',
+        targetConversationUrl: window.location.href,
         messages: [{
           id: 'q1', role: 'user' as const, content: pending().question,
           attachedManually: false, createdAt: '2026-07-12T00:00:00.000Z',
@@ -517,7 +586,7 @@ describe('web bridge and pending banner', () => {
         createdAt: '2026-07-12T00:00:00.000Z',
         updatedAt: '2026-07-12T00:00:00.000Z',
       },
-      targetConversationUrl: 'https://chatgpt.com/', associationStatus: 'target_opened' as const,
+      targetConversationUrl: window.location.href, associationStatus: 'target_opened' as const,
       createdAt: '2026-07-12T00:00:00.000Z', updatedAt: '2026-07-12T00:00:00.000Z',
     };
     const listeners = new Set<(message: unknown) => void>();

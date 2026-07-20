@@ -132,9 +132,25 @@ export const workspaceControlStyles = `${sharedShadowStyles}
     border: 1px solid var(--pa-border); border-radius: var(--pointask-control-radius); color: var(--pa-text); background: var(--pa-bg); box-shadow: var(--pa-shadow); font-size: 13px; line-height: 1.45; }
   .pointask-workspace-control.pointask-collapsed { width: 240px; margin-left: auto; overflow: visible; }
   .pointask-control-header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 48px; padding: 0 16px; background: var(--pa-bg); }
-  .pointask-control-brand { display: flex; align-items: center; min-width: 0; gap: 8px; }
+  .pointask-control-brand { position: relative; display: flex; align-items: center; min-width: 0; gap: 8px; }
   .pointask-control-brand.pointask-has-thread strong::after { content: "·"; margin-left: 8px; color: var(--pa-muted); }
   .pointask-control-brand select { max-width: 112px; border: 1px solid var(--pa-border); border-radius: 7px; padding: 4px 6px; color: inherit; background: var(--pa-bg); font: inherit; }
+  .pointask-thread-switcher { position: relative; min-width: 0; }
+  .pointask-thread-switcher-trigger { display: inline-flex; max-width: 128px; align-items: center; gap: 4px; overflow: hidden; border: 1px solid var(--pa-border); border-radius: 7px; padding: 4px 6px; color: inherit; background: var(--pa-bg); text-overflow: ellipsis; white-space: nowrap; }
+  .pointask-thread-switcher-trigger:hover, .pointask-thread-switcher-trigger[aria-expanded="true"] { background: var(--pa-hover); }
+  .pointask-thread-switcher-menu { position: absolute; z-index: 6; top: calc(100% + 8px); left: -86px; display: grid; width: min(332px, calc(100vw - 48px)); max-height: min(520px, calc(100vh - 88px)); gap: 10px; overflow-y: auto; overscroll-behavior: contain; padding: 8px; border: 1px solid var(--pa-border); border-radius: 11px; color: var(--pa-text); background: var(--pa-bg); box-shadow: var(--pa-shadow); }
+  .pointask-thread-switcher-group { display: grid; gap: 5px; }
+  .pointask-thread-switcher-group h3 { margin: 2px 5px; color: var(--pa-muted); font-size: 11px; font-weight: 650; }
+  .pointask-thread-switcher-item { display: grid; min-width: 0; border: 1px solid transparent; border-radius: 9px; background: var(--pa-bg-subtle); }
+  .pointask-thread-switcher-item.pointask-selected { border-color: var(--pa-accent); }
+  .pointask-thread-switcher-select { display: grid; min-width: 0; gap: 3px; padding: 8px; color: inherit; text-align: left; }
+  .pointask-thread-switcher-select > span:first-child { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .pointask-thread-switcher-select small, .pointask-thread-switcher-select time { color: var(--pa-muted); font-size: 11px; }
+  .pointask-thread-switcher-summary { overflow: hidden; overflow-wrap: anywhere; text-overflow: ellipsis; white-space: nowrap; }
+  .pointask-thread-switcher-actions { display: flex; justify-content: flex-end; gap: 3px; padding: 0 5px 5px; }
+  .pointask-thread-switcher-actions button { padding: 3px 5px; border-radius: 5px; color: var(--pa-muted); font-size: 11px; }
+  .pointask-thread-switcher-actions button:hover { background: var(--pa-hover); }
+  .pointask-thread-switcher-actions .pointask-danger { color: var(--pa-danger); }
   .pointask-control-toggle { flex: none; padding: 6px; border-radius: 7px; color: var(--pa-muted); }
   .pointask-control-toggle:hover { background: var(--pa-hover); }
   .pointask-control-space-title { padding: 0 16px 12px; border-bottom: 1px solid var(--pa-border); color: var(--pa-muted); font-weight: 600; }

@@ -67,6 +67,7 @@ export function migrateStorage(raw: Record<string, unknown>): PointAskStorageSch
         ...(typeof round.skippedAt === 'number' ? { skippedAt: round.skippedAt } : {}),
         ...(typeof round.expiresAt === 'number' ? { expiresAt: round.expiresAt } : {}),
         ...(persistenceStatus === 'staged' && stagedAnswer && attachmentStatus !== 'skipped_expired' ? { stagedAnswer } : { stagedAnswer: undefined }),
+        revision: typeof round.revision === 'number' && Number.isSafeInteger(round.revision) && round.revision >= 0 ? round.revision : 0,
       };
     });
     const roundByQuestion = new Map(rounds.map((round) => [String(round.questionMessageId), String((round as Record<string, unknown>).id)]));
@@ -81,6 +82,7 @@ export function migrateStorage(raw: Record<string, unknown>): PointAskStorageSch
       answerMode: item.answerMode === 'workspace' || item.answerMode === 'current_conversation'
         ? item.answerMode : 'dedicated_branch',
       dedicatedConversationUrl: item.dedicatedConversationUrl ?? item.targetConversationUrl,
+      revision: typeof item.revision === 'number' && Number.isSafeInteger(item.revision) && item.revision >= 0 ? item.revision : 0,
     };
   }).filter(isLocalThread) as LocalThread[];
   const rawPending: unknown[] = Array.isArray(raw[STORAGE_KEYS.pendingThreads]) ? raw[STORAGE_KEYS.pendingThreads] as unknown[] : [];
@@ -103,6 +105,10 @@ export function migrateStorage(raw: Record<string, unknown>): PointAskStorageSch
         ...(roundId ? { roundId } : {}),
         promptHash: typeof item.promptHash === 'string' && item.promptHash ? item.promptHash : stableTextHash(String(item.generatedPrompt ?? '')),
         assistantFingerprintsBefore: Array.isArray(item.assistantFingerprintsBefore) ? item.assistantFingerprintsBefore : [],
+        revision: typeof item.revision === 'number' && Number.isSafeInteger(item.revision) && item.revision >= 0
+          ? item.revision : thread.revision ?? 0,
+        ...(typeof item.operationId === 'string' && item.operationId ? { operationId: item.operationId }
+          : roundId ? { operationId: `pointask-operation-${roundId}` } : {}),
       };
     }).filter(isPendingThread) as unknown as PendingThread[];
   // Persist the transport state into its explicitly addressed round once at
@@ -145,7 +151,9 @@ export function migrateStorage(raw: Record<string, unknown>): PointAskStorageSch
             collapsed: rawControlState.collapsed,
             hasAutoExpanded: rawControlState.hasAutoExpanded,
             updatedAt: rawControlState.updatedAt,
-            ...(typeof rawControlState.activeThreadId === 'string' ? { activeThreadId: rawControlState.activeThreadId } : {}),
+            ...(typeof rawControlState.selectedThreadId === 'string'
+              ? { selectedThreadId: rawControlState.selectedThreadId }
+              : typeof rawControlState.activeThreadId === 'string' ? { selectedThreadId: rawControlState.activeThreadId } : {}),
           } }
         : {}),
       ...((workspace as unknown as Record<string, unknown>).pendingContextUpdate ? { pendingContextUpdate: (workspace as unknown as Record<string, unknown>).pendingContextUpdate as PointAskWorkspace['pendingContextUpdate'] } : {}),

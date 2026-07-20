@@ -28,7 +28,12 @@ export function deriveWorkspaceControlState(options: {
   const { record, candidate, reliable, sending, selectionLength, returnFailed } = options;
   const attachable = options.attachableRoundCount ?? (candidate && reliable ? 1 : 0);
   if (returnFailed) return { status: 'return_failed', label: '内容已附加，但未能返回原页面', primary: 'retry_return' };
-  if (sending) return { status: 'sending', label: '正在发送' };
+  if (sending || record.pendingThread.status === 'submitting' || record.localThread.status === 'submitting') {
+    return { status: 'sending', label: '正在发送' };
+  }
+  if (record.pendingThread.status === 'submission_unknown' || record.localThread.status === 'submission_unknown') {
+    return { status: 'waiting', label: '已提交，正在确认发送' };
+  }
   if (record.localThread.status === 'failed' || record.pendingThread.status === 'failed') return { status: 'failed', label: '发送失败', primary: 'retry' };
   if (candidate?.streaming || record.localThread.status === 'generating') return { status: 'streaming', label: '流式生成中' };
   if (candidate && selectionLength > 0) return { status: 'selection', label: `已选择 ${selectionLength} 个字符`, primary: 'attach_selection_return' };

@@ -14,11 +14,11 @@ export function isActiveWorkspaceThread(record: PendingAssociation, transient = 
     (round.persistenceStatus === 'staged' || round.persistenceStatus === 'attaching' ||
     round.persistenceStatus === 'capture_failed'))) return true;
   if (rounds.some((round) => roundAttachmentStatus(round) === 'available' &&
-    ['waiting_for_submission', 'waiting_for_answer', 'generating', 'answer_ready', 'failed'].includes(round.status))) return true;
+    ['waiting_for_submission', 'submitting', 'submission_unknown', 'waiting_for_answer', 'generating', 'answer_ready', 'failed'].includes(round.status))) return true;
   if (rounds.length > 0 && rounds.every((round) => round.status === 'attached' || round.persistenceStatus === 'attached')) return false;
-  return ['draft', 'prompt_ready', 'waiting_for_submission', 'waiting_for_answer', 'generating', 'answer_ready', 'failed']
+  return ['draft', 'prompt_ready', 'waiting_for_submission', 'submitting', 'submission_unknown', 'waiting_for_answer', 'generating', 'answer_ready', 'failed']
     .includes(record.localThread.status) ||
-    ['prompt_ready', 'waiting_for_submission', 'waiting_for_answer', 'generating', 'answer_ready', 'failed']
+    ['prompt_ready', 'waiting_for_submission', 'submitting', 'submission_unknown', 'waiting_for_answer', 'generating', 'answer_ready', 'failed']
       .includes(record.pendingThread.status);
 }
 

@@ -115,7 +115,7 @@ describe('skipped staged answer retention', () => {
     expect(driver.data[STORAGE_KEYS.threads]).toBeUndefined(); expect(driver.data[STORAGE_KEYS.pendingThreads]).toBeUndefined();
   });
 
-  it('keeps routing pending data until a skipped copy expires, then allows normal pending cleanup', async () => {
+  it('keeps Workspace routing data until its thread is explicitly deleted', async () => {
     const driver = new MemoryStorageDriver(); const threads = new ThreadStore(driver); const pending = new PendingStore(driver);
     const retained = { ...round('q1'), attachmentStatus: 'skipped_retained' as const, skippedAt: now,
       expiresAt: now + SKIPPED_STAGED_ANSWER_RETENTION_MS };
@@ -124,6 +124,7 @@ describe('skipped staged answer retention', () => {
     expect(await pending.deleteExpired(24, new Date(now))).toBe(0);
     expect(await pending.get(pendingValue.id)).not.toBeNull();
     await threads.cleanupExpiredStagedAnswers(now + SKIPPED_STAGED_ANSWER_RETENTION_MS);
-    expect(await pending.deleteExpired(24, new Date(now + SKIPPED_STAGED_ANSWER_RETENTION_MS))).toBe(1);
+    expect(await pending.deleteExpired(24, new Date(now + SKIPPED_STAGED_ANSWER_RETENTION_MS))).toBe(0);
+    expect(await pending.deleteForThread(value.id)).toBe(1);
   });
 });

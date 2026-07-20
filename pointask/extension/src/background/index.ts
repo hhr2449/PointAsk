@@ -1,4 +1,4 @@
-import { isCompatibleChatGptTargetUrl, isPointAskRuntimeMessage, type PendingAssociation } from '../bridge/runtime-messages';
+import { isCompatibleChatGptTargetUrl, isPointAskRuntimeMessage, isSameChatGptConversationUrl, type PendingAssociation } from '../bridge/runtime-messages';
 import { PendingAssociationCoordinator } from './pending-association-coordinator';
 import { ChromeStorageDriver } from '../storage/storage-driver';
 import { ThreadStore } from '../storage/thread-store';
@@ -7,7 +7,8 @@ import { SettingsStore } from '../storage/settings-store';
 import { WorkspaceStore } from '../storage/workspace-store';
 import { runStorageMigration } from '../storage/migration';
 import { NavigationStore, ThreadReturnStore } from '../storage/navigation-store';
-import { threadRounds } from '../shared/thread-rounds';
+import { questionForRound, threadRounds } from '../shared/thread-rounds';
+import { richPlainText } from '../shared/rich-content';
 
 interface TabGateway {
   create(options: { url: string; active: boolean }): Promise<{ id?: number; url?: string; pendingUrl?: string; status?: string }>;
@@ -267,15 +268,25 @@ export async function handleRuntimeMessage(
             await waitForReadyTarget(deps.tabs, tab.id, targetUrl);
             const response = await deps.tabs.sendMessage(tab.id, {
               type: 'pointask:execute-pending-send', record: routed, promptHash: message.promptHash, attemptId: message.attemptId,
-            }) as { ok?: boolean; attemptId?: string; error?: string } | undefined;
+            }) as { ok?: boolean; submissionUnknown?: boolean; attemptId?: string; error?: string } | undefined;
             if (!response?.ok || response.attemptId !== message.attemptId) throw new Error(response?.error || '目标页面未确认发送');
             const submitted = deps.coordinator.get(message.pendingThreadId);
-            if (!submitted || submitted.pendingThread.submittedPromptHash !== message.promptHash) throw new Error('发送状态未确认');
+            if (submitted?.pendingThread.submittedPromptHash !== message.promptHash) {
+              if (!response.submissionUnknown) throw new Error('发送状态未确认');
+              const unknown = deps.coordinator.markSubmissionUnknown(message.pendingThreadId, tab.id, message.promptHash, targetUrl);
+              if (!unknown) throw new Error('发送状态未确认');
+              await persist(unknown, deps); await notify(unknown, deps.tabs);
+              return { ok: true, data: { record: unknown, autoSent: true } };
+            }
+            if (!submitted) throw new Error('发送状态未确认');
             await persist(submitted, deps);
             return { ok: true, data: { record: submitted, autoSent: true } };
           } catch (error) {
             const submitted = deps.coordinator.get(message.pendingThreadId);
             if (submitted?.pendingThread.submittedPromptHash === message.promptHash) {
+              return { ok: true, data: { record: submitted, autoSent: true } };
+            }
+            if (submitted?.pendingThread.status === 'submission_unknown') {
               return { ok: true, data: { record: submitted, autoSent: true } };
             }
             const failed = deps.coordinator.markSendFailed(message.pendingThreadId);
@@ -388,7 +399,7 @@ export async function handleRuntimeMessage(
           message.skippedRoundIds);
         if (!record) throw new Error('所选轮次无法附加到当前线程');
         try { await persist(record, deps); }
-        catch (error) { deps.coordinator.restoreSnapshot(existing); throw error; }
+        catch (error) { deps.coordinator.restoreSnapshot(existing, record.revision); throw error; }
         await notify(record, deps.tabs);
         return { ok: true, data: record };
       }
@@ -400,7 +411,7 @@ export async function handleRuntimeMessage(
           message.targetUrl, message.captureFailed, message.richContent, message.answerSource);
         if (!record) throw new Error('当前回答无法暂存，请确认轮次和 Workspace 页面后重试');
         try { await persist(record, deps); }
-        catch (error) { deps.coordinator.restoreSnapshot(existing); throw error; }
+        catch (error) { deps.coordinator.restoreSnapshot(existing, record.revision); throw error; }
         await notify(record, deps.tabs);
         return { ok: true, data: record };
       }
@@ -408,9 +419,19 @@ export async function handleRuntimeMessage(
         const existing = deps.coordinator.findByThreadId(message.threadId);
         const stored = await deps.threadStore?.get(message.threadId);
         const sourceKey = existing?.localThread.sourceConversationKey ?? stored?.sourceConversationKey;
-        if (!sourceKey || !senderMatchesSource(sender.tab?.url, sourceKey)) throw new Error('Only the source page may delete a PointAsk thread');
+        const targetUrl = existing?.targetConversationUrl ?? stored?.targetConversationUrl;
+        const sourceAllowed = Boolean(sourceKey && senderMatchesSource(sender.tab?.url, sourceKey));
+        const workspaceAllowed = Boolean((existing?.localThread.answerMode ?? stored?.answerMode) === 'workspace' && targetUrl && sender.tab?.url &&
+          isSameChatGptConversationUrl(targetUrl, sender.tab.url));
+        if (!sourceAllowed && !workspaceAllowed) throw new Error('Only the source page or its Workspace may delete a PointAsk thread');
         deps.coordinator.deleteThread(message.threadId);
         await Promise.all([deps.threadStore?.delete(message.threadId), deps.pendingStore?.deleteForThread(message.threadId)]);
+        const workspaceId = existing?.localThread.workspaceId ?? stored?.workspaceId;
+        if (workspaceId && deps.workspaceStore) {
+          const workspace = await deps.workspaceStore.get(workspaceId);
+          if (workspace) await deps.workspaceStore.upsert({ ...workspace, threadCount: Math.max(0, workspace.threadCount - 1),
+            updatedAt: new Date().toISOString() });
+        }
         return { ok: true };
       }
       case 'pointask:pending-thread-updated': {
@@ -472,25 +493,56 @@ export async function handleRuntimeMessage(
         return { ok: true, data: record };
       }
       case 'pointask:get-page-pending-threads': {
-        const live = deps.coordinator.forPage(senderTabId).filter((record) => record.pendingThread.status !== 'answer_attached' ||
-          threadRounds(record.localThread, record.pendingThread).some((round) => round.status === 'answer_ready' || round.status === 'generating'));
-        if (live.length || !deps.threadStore || !deps.pendingStore) return { ok: true, data: live };
+        const live = deps.coordinator.forPage(senderTabId).filter((record) => record.localThread.answerMode === 'workspace'
+          ? Boolean(record.targetConversationUrl && isSameChatGptConversationUrl(record.targetConversationUrl, message.currentUrl) &&
+            !isSameChatGptConversationUrl(record.localThread.sourceConversationKey, message.currentUrl)) :
+          record.pendingThread.status !== 'answer_attached' || threadRounds(record.localThread, record.pendingThread)
+            .some((round) => round.status === 'answer_ready' || round.status === 'generating'));
+        if (!deps.threadStore || !deps.pendingStore) return { ok: true, data: live };
         const [threads, pendingThreads] = await Promise.all([deps.threadStore.list(), deps.pendingStore.list()]);
-        const restored: PendingAssociation[] = [];
+        const restored = new Map(live.map((record) => [record.localThread.id, record]));
         for (const thread of threads.filter((item) => {
+          if (item.answerMode === 'workspace') return Boolean(item.targetConversationUrl &&
+            isSameChatGptConversationUrl(item.targetConversationUrl, message.currentUrl) &&
+            !isSameChatGptConversationUrl(item.sourceConversationKey, message.currentUrl));
           if (['failed', 'orphaned'].includes(item.status)) return false;
-          if (item.status === 'answer_attached' && !threadRounds(item).some((round) => round.status === 'answer_ready' || round.status === 'generating')) return false;
+          if (item.status === 'answer_attached' && !threadRounds(item).some((round) =>
+            round.status === 'answer_ready' || round.status === 'generating')) return false;
           return item.answerMode === 'current_conversation'
             ? isCompatibleChatGptTargetUrl(item.sourceConversationKey, message.currentUrl)
             : Boolean(item.targetConversationUrl && isCompatibleChatGptTargetUrl(item.targetConversationUrl, message.currentUrl));
         })) {
-          const pending = pendingThreads.find((item) => (item.threadId || item.id) === thread.id);
+          const storedPending = pendingThreads.find((item) => (item.threadId || item.id) === thread.id);
+          const latestRound = threadRounds(thread).at(-1);
+          const question = latestRound ? questionForRound(thread, latestRound.id) : undefined;
+          const pending = storedPending ?? (thread.answerMode === 'workspace' && latestRound ? {
+            id: latestRound.pendingId || `pointask-recovered-${thread.id}`,
+            threadId: thread.id,
+            roundId: latestRound.id,
+            sourcePageUrl: thread.sourcePageUrl,
+            sourceConversationKey: thread.sourceConversationKey,
+            sourceMessageFingerprint: thread.sourceMessageFingerprint,
+            anchor: thread.anchor,
+            question: question ? richPlainText(question.content) : '',
+            generatedPrompt: '',
+            promptMode: 'compact' as const,
+            status: latestRound.status === 'attached' ? 'answer_attached' as const : latestRound.status,
+            createdAt: latestRound.createdAt,
+            updatedAt: latestRound.updatedAt,
+            targetConversationUrl: thread.targetConversationUrl,
+            displayId: thread.displayId,
+            answerMode: thread.answerMode,
+            workspaceId: thread.workspaceId,
+            promptHash: latestRound.promptHash,
+            assistantFingerprintsBefore: latestRound.assistantFingerprintsBefore,
+            candidateAnswerFingerprint: latestRound.candidateAnswerFingerprint,
+          } : undefined);
           if (!pending) continue;
           deps.coordinator.restore(pending, thread, -1);
           const record = deps.coordinator.markTargetOpened(pending.id, senderTabId, message.currentUrl);
-          if (record) restored.push(record);
+          if (record) restored.set(thread.id, record);
         }
-        return { ok: true, data: restored };
+        return { ok: true, data: [...restored.values()] };
       }
       case 'pointask:get-source-threads': {
         if (!deps.threadStore || !deps.pendingStore) return { ok: true, data: deps.coordinator.forSourceTab(senderTabId) };
@@ -548,6 +600,20 @@ export async function handleRuntimeMessage(
         await ensureTargetRecord(message.pendingThreadId, senderTabId, sender.tab?.url, deps);
         const record = deps.coordinator.reserveSubmission(message.pendingThreadId, senderTabId, message.promptHash, message.targetUrl);
         if (!record) throw new Error('该问题已发送，或当前页面与线程不匹配');
+        await persist(record, deps); await notify(record, deps.tabs);
+        return { ok: true, data: record };
+      }
+      case 'pointask:mark-submission-unknown': {
+        await ensureTargetRecord(message.pendingThreadId, senderTabId, sender.tab?.url, deps);
+        const record = deps.coordinator.markSubmissionUnknown(message.pendingThreadId, senderTabId, message.promptHash, message.targetUrl);
+        if (!record) throw new Error('无法保存发送确认状态');
+        await persist(record, deps); await notify(record, deps.tabs);
+        return { ok: true, data: record };
+      }
+      case 'pointask:mark-submission-started': {
+        await ensureTargetRecord(message.pendingThreadId, senderTabId, sender.tab?.url, deps);
+        const record = deps.coordinator.markSubmissionStarted(message.pendingThreadId, senderTabId, message.promptHash, message.targetUrl);
+        if (!record) throw new Error('无法开始本次发送');
         await persist(record, deps); await notify(record, deps.tabs);
         return { ok: true, data: record };
       }

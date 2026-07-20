@@ -107,13 +107,15 @@ export function ThreadCard(props: ThreadCardProps) {
   const latestAnswer = answers.at(-1);
   const roundCount = rounds.length;
   const waitingSubmission = thread.status === 'draft' || thread.status === 'prompt_ready' || thread.status === 'waiting_for_submission';
-  const waitingAnswer = thread.status === 'waiting_for_answer' || thread.status === 'generating';
+  const waitingAnswer = thread.status === 'submitting' || thread.status === 'submission_unknown' ||
+    thread.status === 'waiting_for_answer' || thread.status === 'generating';
   const answerReady = thread.status === 'answer_ready';
   const attached = thread.status === 'answer_attached';
   const currentConversation = thread.answerMode === 'current_conversation';
   const modeLabel = thread.answerMode === 'workspace' ? '共享追问空间' : thread.answerMode === 'current_conversation' ? '当前对话' : '独立分支';
   const failed = thread.status === 'failed';
-  const statusLabel = sending || waitingSubmission ? '正在发送……' : waitingAnswer ? (currentConversation ? '正在回答' : '正在等待回答……') : answerReady ? '回答已生成'
+  const statusLabel = sending || waitingSubmission || thread.status === 'submitting' ? '正在发送……' : thread.status === 'submission_unknown' ? '正在确认发送……'
+    : waitingAnswer ? (currentConversation ? '正在回答' : '正在等待回答……') : answerReady ? '回答已生成'
     : failed ? '发送失败' : thread.status === 'orphaned' ? '关联失效' : null;
   const primaryLabel = attached ? '继续追问' : currentConversation && (waitingAnswer || answerReady) ? '查看新回答'
     : failed ? '重新发送' : '查看回答';

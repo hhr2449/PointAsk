@@ -1,16 +1,16 @@
-import type { PendingAssociation } from '../bridge/runtime-messages';
+import type { WorkspaceThreadListItem } from './workspace-thread-list';
+import { WorkspaceThreadSwitcher } from './workspace-thread-switcher';
 
-export function WorkspaceControlHeader({ record, records, expanded, onToggle, onSwitch }: {
-  record?: PendingAssociation; records: PendingAssociation[]; expanded: boolean;
-  onToggle(): void; onSwitch(id: string): void;
+export function WorkspaceControlHeader({ selectedThreadId, threads, expanded, onToggle, onSwitch, onReturnThread, onDeleteThread }: {
+  selectedThreadId?: string; threads?: WorkspaceThreadListItem[]; expanded: boolean;
+  onToggle(): void; onSwitch(threadId: string): void; onReturnThread?(threadId: string): void; onDeleteThread?(threadId: string): void;
 }) {
-  const switchable = records.length > 1 || !record && records.length > 0;
+  const availableThreads = threads ?? [];
   return <header className="pointask-control-header">
-    <div className={`pointask-control-brand${record || records.length ? ' pointask-has-thread' : ''}`}><strong>PointAsk</strong>{switchable ? <select aria-label="切换 PointAsk 线程"
-      value={record?.pendingThread.id ?? ''} onChange={(event) => event.target.value && onSwitch(event.target.value)}>
-      {!record && <option value="">选择追问</option>}
-      {records.map((item) => <option key={item.pendingThread.id} value={item.pendingThread.id}>{item.localThread.displayId}</option>)}
-    </select> : record ? <span>{record.localThread.displayId}</span> : null}</div>
+    <div className={`pointask-control-brand${availableThreads.length ? ' pointask-has-thread' : ''}`}><strong>PointAsk</strong>
+      {availableThreads.length > 0 && <WorkspaceThreadSwitcher items={availableThreads} selectedThreadId={selectedThreadId} onSelect={onSwitch}
+        onReturn={onReturnThread ?? (() => undefined)} onDelete={onDeleteThread ?? (() => undefined)} />}
+    </div>
     <button type="button" className="pointask-control-toggle" aria-expanded={expanded} aria-controls="pointask-workspace-control-body"
       onClick={onToggle}>{expanded ? '收起' : '›'}</button>
   </header>;

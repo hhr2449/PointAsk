@@ -1,9 +1,10 @@
 import type { PendingThread } from '../bridge/pending-thread-manager';
-import { isCompatibleChatGptTargetUrl, type AttachedRoundPayload, type PendingAssociation } from '../bridge/runtime-messages';
+import { isCompatibleChatGptTargetUrl, isSameChatGptConversationUrl, type AttachedRoundPayload, type PendingAssociation } from '../bridge/runtime-messages';
 import type { AnswerSourceLocator, LocalMessage, LocalThread, RichContentBlock } from '../shared/local-thread';
 import { richPlainText, textBlocks } from '../shared/rich-content';
 import { answerForRound, insertRoundAnswer, pendingStatus, questionForRound, roundIdForPending, syncPendingRound, threadRounds } from '../shared/thread-rounds';
 import { roundAttachmentStatus, SKIPPED_STAGED_ANSWER_RETENTION_MS } from '../shared/staged-answer-retention';
+import { logPointAskLifecycle } from '../shared/lifecycle-log';
 
 export const PENDING_EXPIRY_MS = 24 * 60 * 60 * 1_000;
 
@@ -18,28 +19,40 @@ export class PendingAssociationCoordinator {
 
   create(pendingThread: PendingThread, sourceTabId: number, localThread?: LocalThread): PendingAssociation {
     const existing = this.records.get(pendingThread.id);
+    const previousForThread = [...this.records.values()].filter((item) => item.localThread.id === (pendingThread.threadId || pendingThread.id))
+      .sort((a, b) => (b.revision ?? 0) - (a.revision ?? 0))[0];
+    const revision = Math.max(pendingThread.revision ?? 0, localThread?.revision ?? 0,
+      existing?.revision ?? 0, previousForThread && previousForThread.pendingThread.id !== pendingThread.id ? (previousForThread.revision ?? 0) + 1 : 0, 1);
     const timestamp = this.now().toISOString();
+    const normalizedPending = { ...pendingThread, revision };
+    const normalizedThread = localThread ? { ...localThread, revision } : undefined;
     const record: PendingAssociation = existing
-      ? { ...existing, pendingThread, localThread: localThread ?? existing.localThread, sourceTabId, updatedAt: timestamp }
+      ? { ...existing, pendingThread: normalizedPending, localThread: normalizedThread ?? existing.localThread,
+          sourceTabId, revision, updatedAt: timestamp }
       : {
-          pendingThread,
-          localThread: localThread ?? this.createLocalThread(pendingThread, timestamp),
+          pendingThread: normalizedPending,
+          localThread: normalizedThread ?? { ...this.createLocalThread(normalizedPending, timestamp), revision },
           sourceTabId,
           targetConversationUrl: localThread?.targetConversationUrl ?? pendingThread.targetConversationUrl,
           associationStatus: 'created',
           createdAt: timestamp,
           updatedAt: timestamp,
+          revision,
         };
     this.records.set(pendingThread.id, record);
+    logPointAskLifecycle({ threadId: record.localThread.id, roundId: record.pendingThread.roundId,
+      pendingId: record.pendingThread.id, operationId: record.pendingThread.operationId, revision,
+      event: 'create_round', afterStatus: record.localThread.status, activeRoundId: record.pendingThread.roundId });
     return record;
   }
 
   restore(pendingThread: PendingThread, localThread: LocalThread, sourceTabId: number): PendingAssociation {
     const timestamp = this.now().toISOString();
     const existing = this.records.get(pendingThread.id);
+    const revision = Math.max(pendingThread.revision ?? 0, localThread.revision ?? 0, existing?.revision ?? 0);
     const record: PendingAssociation = {
-      pendingThread,
-      localThread,
+      pendingThread: { ...pendingThread, revision },
+      localThread: { ...localThread, revision },
       sourceTabId,
       // tabId is a process-local binding. Never revive a persisted tab ID
       // after a service-worker restart; the stable conversation URL is used
@@ -49,18 +62,27 @@ export class PendingAssociationCoordinator {
       associationStatus: existing?.associationStatus ?? (localThread.status === 'answer_attached' ? 'completed' : localThread.targetConversationUrl ? 'associated' : 'created'),
       createdAt: existing?.createdAt ?? localThread.createdAt,
       updatedAt: timestamp,
+      revision,
     };
     this.records.set(pendingThread.id, record);
     return record;
   }
 
-  restoreSnapshot(record: PendingAssociation): void { this.records.set(record.pendingThread.id, record); }
+  restoreSnapshot(record: PendingAssociation, expectedCurrentRevision?: number): void {
+    const current = this.records.get(record.pendingThread.id);
+    if (!current || expectedCurrentRevision === undefined && (record.revision ?? 0) >= (current.revision ?? 0) ||
+      expectedCurrentRevision !== undefined && (current.revision ?? 0) === expectedCurrentRevision) {
+      this.records.set(record.pendingThread.id, record);
+    }
+  }
 
   markTargetOpened(id: string, targetTabId: number, targetUrl: string): PendingAssociation | null {
     const record = this.get(id);
-    if (!record) return null;
-    const status = ['waiting_for_answer', 'generating', 'answer_ready', 'answer_attached'].includes(record.localThread.status)
-      ? record.localThread.status : 'waiting_for_submission';
+    if (!record || (record.localThread.answerMode === 'workspace' &&
+      isSameChatGptConversationUrl(record.localThread.sourceConversationKey, targetUrl))) return null;
+    const status = record.localThread.status === 'submitting' ? 'submission_unknown' :
+      ['submission_unknown', 'waiting_for_answer', 'generating', 'answer_ready', 'answer_attached'].includes(record.localThread.status)
+        ? record.localThread.status : 'waiting_for_submission';
     return this.update(id, {
       pendingThread: { ...record.pendingThread, targetConversationUrl: targetUrl, targetTabId, targetConversationKey: record.localThread.answerMode === 'current_conversation' ? record.localThread.sourceConversationKey : targetUrl, status: this.toPendingStatus(status) },
       localThread: syncPendingRound({
@@ -91,7 +113,8 @@ export class PendingAssociationCoordinator {
 
   associate(id: string, targetTabId: number, targetUrl: string, confirmReassociation = false): PendingAssociation | null {
     const record = this.get(id);
-    if (!record) return null;
+    if (!record || (record.localThread.answerMode === 'workspace' &&
+      isSameChatGptConversationUrl(record.localThread.sourceConversationKey, targetUrl))) return null;
     const conflict = [...this.records.values()].some((candidate) =>
       candidate.pendingThread.id !== id && candidate.targetTabId === targetTabId &&
       candidate.associationStatus !== 'cancelled' && candidate.localThread.status !== 'answer_attached' &&
@@ -105,8 +128,9 @@ export class PendingAssociationCoordinator {
     );
     if (conflict) return null;
     if (record.targetTabId !== undefined && record.targetTabId !== targetTabId && !confirmReassociation) return null;
-    const status = ['waiting_for_answer', 'generating', 'answer_ready', 'answer_attached'].includes(record.localThread.status)
-      ? record.localThread.status : 'waiting_for_submission';
+    const status = record.localThread.status === 'submitting' ? 'submission_unknown' :
+      ['submission_unknown', 'waiting_for_answer', 'generating', 'answer_ready', 'answer_attached'].includes(record.localThread.status)
+        ? record.localThread.status : 'waiting_for_submission';
     return this.update(id, {
       pendingThread: { ...record.pendingThread, targetConversationUrl: targetUrl, targetTabId, targetConversationKey: record.localThread.answerMode === 'current_conversation' ? record.localThread.sourceConversationKey : targetUrl, status: this.toPendingStatus(status) },
       localThread: syncPendingRound({
@@ -270,11 +294,14 @@ export class PendingAssociationCoordinator {
     const record = this.get(id);
     const rounds = record ? threadRounds(record.localThread) : [];
     if (!record || record.targetTabId !== targetTabId || record.associationStatus === 'cancelled' ||
+      record.associationStatus === 'completed' ||
       record.pendingThread.id !== id ||
       !record.targetConversationUrl || !isCompatibleChatGptTargetUrl(record.targetConversationUrl, targetUrl)) return null;
     const current = rounds.find((round) => round.id === roundId);
     if (!current || current.promptHash !== promptHash || current.persistenceStatus === 'attached') return null;
-    if (current.persistenceStatus === 'staged' && !captureFailed) return record;
+    // A delayed capture failure must never erase content already staged by a
+    // newer successful extraction of the same threadId + roundId.
+    if (current.persistenceStatus === 'staged') return record;
     const timestamp = this.now().toISOString();
     if (!captureFailed && (current.status !== 'answer_ready' || !richContent?.length || !answerSource)) return null;
     const updatedRound = captureFailed ? {
@@ -300,10 +327,16 @@ export class PendingAssociationCoordinator {
   }
   markCandidate(id: string, senderTabId: number, fingerprint: string, streaming: boolean): PendingAssociation | null {
     const record = this.get(id);
-    if (!record || record.targetTabId !== senderTabId || record.associationStatus === 'cancelled') return null;
+    if (!record || record.targetTabId !== senderTabId || record.associationStatus === 'cancelled' || record.associationStatus === 'completed') return null;
+    const addressedRound = record.pendingThread.roundId
+      ? threadRounds(record.localThread).find((round) => round.id === record.pendingThread.roundId) : undefined;
+    if (record.pendingThread.roundId && (!addressedRound || addressedRound.pendingId !== id ||
+      addressedRound.promptHash !== record.pendingThread.promptHash)) return null;
     const status: PendingThread['status'] = streaming ? 'generating' : 'answer_ready';
     const timestamp = this.now().toISOString();
-    const pending = { ...record.pendingThread, candidateAnswerFingerprint: fingerprint, status, updatedAt: timestamp };
+    const pending = { ...record.pendingThread, candidateAnswerFingerprint: fingerprint, status,
+      submittedPromptHash: record.pendingThread.promptHash || record.pendingThread.submittedPromptHash,
+      submittedAt: record.pendingThread.submittedAt ?? timestamp, updatedAt: timestamp };
     let localThread = syncPendingRound({ ...record.localThread, status, updatedAt: timestamp }, pending, pendingStatus(status));
     const roundId = pending.roundId;
     if (roundId && record.targetConversationUrl) {
@@ -316,10 +349,16 @@ export class PendingAssociationCoordinator {
         ...round, answerSource, candidateAnswerFingerprint: fingerprint, status: pendingStatus(status), updatedAt: timestamp,
       } : round) };
     }
-    return this.update(id, {
+    const updated = this.update(id, {
       pendingThread: pending,
       localThread,
     });
+    if (updated) logPointAskLifecycle({ threadId: updated.localThread.id, roundId, pendingId: id,
+      operationId: updated.pendingThread.operationId, revision: updated.revision,
+      event: streaming ? 'answer_streaming' : 'answer_ready', beforeStatus: record.localThread.status,
+      afterStatus: updated.localThread.status, activeRoundId: updated.pendingThread.roundId,
+      promptMatched: true, assistantMatched: true, streaming });
+    return updated;
   }
 
   reserveSubmission(id: string, senderTabId: number, promptHash: string, targetUrl: string): PendingAssociation | null {
@@ -335,6 +374,43 @@ export class PendingAssociationCoordinator {
       pendingThread: { ...record.pendingThread, submittedPromptHash: promptHash, submittedAt: timestamp, status: 'waiting_for_answer', updatedAt: timestamp },
       localThread: syncPendingRound({ ...record.localThread, status: 'waiting_for_answer', updatedAt: timestamp },
         { ...record.pendingThread, submittedPromptHash: promptHash, submittedAt: timestamp, status: 'waiting_for_answer', updatedAt: timestamp }),
+      associationStatus: 'associated',
+    });
+  }
+
+  markSubmissionStarted(id: string, senderTabId: number, promptHash: string, targetUrl: string): PendingAssociation | null {
+    const record = this.get(id);
+    if (!record || record.targetTabId !== senderTabId || record.associationStatus === 'cancelled' ||
+      record.associationStatus === 'completed' || record.pendingThread.promptHash !== promptHash ||
+      record.pendingThread.submittedPromptHash === promptHash) return null;
+    const validTarget = record.localThread.answerMode === 'current_conversation'
+      ? isCompatibleChatGptTargetUrl(record.localThread.sourceConversationKey, targetUrl)
+      : Boolean(record.targetConversationUrl && isCompatibleChatGptTargetUrl(record.targetConversationUrl, targetUrl));
+    if (!validTarget) return null;
+    const timestamp = this.now().toISOString();
+    const pending = { ...record.pendingThread, status: 'submitting' as const, updatedAt: timestamp };
+    return this.update(id, { pendingThread: pending,
+      localThread: syncPendingRound({ ...record.localThread, status: 'submitting', updatedAt: timestamp }, pending),
+      associationStatus: 'associated' });
+  }
+
+  markSubmissionUnknown(id: string, senderTabId: number, promptHash: string, targetUrl: string): PendingAssociation | null {
+    const record = this.get(id);
+    if (!record || record.targetTabId !== senderTabId || record.associationStatus === 'cancelled' ||
+      record.pendingThread.promptHash !== promptHash) return null;
+    if (record.pendingThread.submittedPromptHash === promptHash) return record;
+    const currentRound = threadRounds(record.localThread).find((round) => round.id === record.pendingThread.roundId);
+    if (currentRound && (['waiting_for_answer', 'generating', 'answer_ready', 'attached'].includes(currentRound.status) ||
+      ['staged', 'attached'].includes(currentRound.persistenceStatus))) return record;
+    const validTarget = record.localThread.answerMode === 'current_conversation'
+      ? isCompatibleChatGptTargetUrl(record.localThread.sourceConversationKey, targetUrl)
+      : Boolean(record.targetConversationUrl && isCompatibleChatGptTargetUrl(record.targetConversationUrl, targetUrl));
+    if (!validTarget) return null;
+    const timestamp = this.now().toISOString();
+    const pending = { ...record.pendingThread, status: 'submission_unknown' as const, updatedAt: timestamp };
+    return this.update(id, {
+      pendingThread: pending,
+      localThread: syncPendingRound({ ...record.localThread, status: 'submission_unknown', updatedAt: timestamp }, pending),
       associationStatus: 'associated',
     });
   }
@@ -355,6 +431,16 @@ export class PendingAssociationCoordinator {
   markSendFailed(id: string): PendingAssociation | null {
     const record = this.get(id);
     if (!record || record.pendingThread.submittedPromptHash === record.pendingThread.promptHash) return record;
+    const currentRound = threadRounds(record.localThread).find((round) => round.id === record.pendingThread.roundId);
+    if (record.associationStatus === 'completed' || currentRound &&
+      (['waiting_for_answer', 'generating', 'answer_ready', 'attached'].includes(currentRound.status) ||
+        ['staged', 'attached'].includes(currentRound.persistenceStatus))) {
+      logPointAskLifecycle({ threadId: record.localThread.id, roundId: record.pendingThread.roundId,
+        pendingId: id, operationId: record.pendingThread.operationId, revision: record.revision,
+        event: 'stale_result_discarded', beforeStatus: record.localThread.status, afterStatus: 'failed',
+        activeRoundId: record.pendingThread.roundId, errorCode: 'late_send_failure' });
+      return record;
+    }
     const timestamp = this.now().toISOString();
     return this.update(id, {
       pendingThread: { ...record.pendingThread, status: 'failed', updatedAt: timestamp },
@@ -414,15 +500,20 @@ export class PendingAssociationCoordinator {
       if (record.targetTabId !== tabId) continue;
       const { targetTabId: _pendingTabId, ...pendingThread } = record.pendingThread;
       void _pendingTabId;
-      const shouldRetry = pendingThread.submittedPromptHash !== pendingThread.promptHash &&
+      const shouldRetry = pendingThread.status !== 'submission_unknown' && pendingThread.status !== 'submitting' &&
+        pendingThread.submittedPromptHash !== pendingThread.promptHash &&
         (pendingThread.status === 'waiting_for_submission' || record.localThread.status === 'waiting_for_submission');
+      const revision = (record.revision ?? 0) + 1;
       const next: PendingAssociation = {
         ...record,
-        pendingThread: { ...pendingThread, status: shouldRetry ? 'failed' : pendingThread.status },
-        localThread: { ...record.localThread, status: shouldRetry ? 'failed' : record.localThread.status },
+        pendingThread: { ...pendingThread, status: pendingThread.status === 'submitting' ? 'submission_unknown' :
+          shouldRetry ? 'failed' : pendingThread.status, revision },
+        localThread: { ...record.localThread, status: record.localThread.status === 'submitting' ? 'submission_unknown' :
+          shouldRetry ? 'failed' : record.localThread.status, revision },
         targetTabId: undefined,
         associationStatus: record.targetConversationUrl ? 'associated' : 'created',
         updatedAt: this.now().toISOString(),
+        revision,
       };
       this.records.set(id, next); updated.push(next);
     }
@@ -432,7 +523,11 @@ export class PendingAssociationCoordinator {
   private update(id: string, changes: Partial<PendingAssociation>): PendingAssociation | null {
     const record = this.records.get(id);
     if (!record) return null;
-    const updated = { ...record, ...changes, updatedAt: this.now().toISOString() };
+    const revision = Math.max(record.revision ?? 0, record.pendingThread.revision ?? 0, record.localThread.revision ?? 0) + 1;
+    const changedPending = changes.pendingThread ?? record.pendingThread;
+    const changedThread = changes.localThread ?? record.localThread;
+    const updated = { ...record, ...changes, pendingThread: { ...changedPending, revision },
+      localThread: { ...changedThread, revision }, revision, updatedAt: this.now().toISOString() };
     this.records.set(id, updated);
     return updated;
   }

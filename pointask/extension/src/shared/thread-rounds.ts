@@ -45,7 +45,25 @@ export function pendingStatus(status?: PendingThread['status']): LocalThreadRoun
   if (status === 'failed') return 'failed';
   if (status === 'answer_attached') return 'attached';
   if (status === 'waiting_for_answer') return 'waiting_for_answer';
+  if (status === 'submitting') return 'submitting';
+  if (status === 'submission_unknown') return 'submission_unknown';
   return 'waiting_for_submission';
+}
+
+const ROUND_STATUS_RANK: Record<LocalThreadRound['status'], number> = {
+  failed: -1,
+  waiting_for_submission: 0,
+  submitting: 1,
+  submission_unknown: 2,
+  waiting_for_answer: 3,
+  generating: 4,
+  answer_ready: 5,
+  attached: 6,
+};
+
+export function canAdvanceRoundStatus(before: LocalThreadRound['status'], after: LocalThreadRound['status']): boolean {
+  if (before === after || before === 'failed') return true;
+  return ROUND_STATUS_RANK[after] >= ROUND_STATUS_RANK[before];
 }
 
 export function roundIdForPending(thread: LocalThread, pending: PendingThread): string | undefined {
@@ -57,24 +75,29 @@ export function syncPendingRound(thread: LocalThread, pending: PendingThread, st
   const latestQuestion = thread.messages.filter((message) => message.role === 'user').at(-1);
   const id = pending.roundId ?? latestQuestion?.roundId ?? latestQuestion?.id;
   if (!id) return thread;
+  const existing = rounds.find((round) => round.id === id);
+  const addressedQuestion = thread.messages.find((message) => message.role === 'user' &&
+    (message.roundId === id || message.id === existing?.questionMessageId));
+  const nextStatus = existing && !canAdvanceRoundStatus(existing.status, status) ? existing.status : status;
   const now = pending.updatedAt;
   const value: LocalThreadRound = {
     id, pendingId: pending.id, promptHash: pending.promptHash || `pointask-prompt-${pending.id}`,
-    questionMessageId: rounds.find((round) => round.id === id)?.questionMessageId ?? latestQuestion?.id ?? id,
-    answerMessageId: rounds.find((round) => round.id === id)?.answerMessageId,
-    assistantFingerprintsBefore: pending.assistantFingerprintsBefore ?? [],
-    candidateAnswerFingerprint: pending.candidateAnswerFingerprint,
-    status, createdAt: rounds.find((round) => round.id === id)?.createdAt ?? pending.createdAt, updatedAt: now,
-    persistenceStatus: rounds.find((round) => round.id === id)?.persistenceStatus ?? (status === 'attached' ? 'attached' : 'not_captured'),
-    attachmentStatus: rounds.find((round) => round.id === id)?.attachmentStatus ?? (status === 'attached' ? 'attached' : 'available'),
-    stagedAnswer: rounds.find((round) => round.id === id)?.stagedAnswer,
-    skippedAt: rounds.find((round) => round.id === id)?.skippedAt,
-    expiresAt: rounds.find((round) => round.id === id)?.expiresAt,
-    capturedAt: rounds.find((round) => round.id === id)?.capturedAt,
-    attachedAt: rounds.find((round) => round.id === id)?.attachedAt,
-    answerSource: rounds.find((round) => round.id === id)?.answerSource,
+    questionMessageId: existing?.questionMessageId ?? addressedQuestion?.id ?? (!pending.roundId ? latestQuestion?.id : undefined) ?? id,
+    answerMessageId: existing?.answerMessageId,
+    assistantFingerprintsBefore: pending.assistantFingerprintsBefore ?? existing?.assistantFingerprintsBefore ?? [],
+    candidateAnswerFingerprint: pending.candidateAnswerFingerprint ?? existing?.candidateAnswerFingerprint,
+    status: nextStatus, createdAt: existing?.createdAt ?? pending.createdAt, updatedAt: now,
+    persistenceStatus: existing?.persistenceStatus ?? (nextStatus === 'attached' ? 'attached' : 'not_captured'),
+    attachmentStatus: existing?.attachmentStatus ?? (nextStatus === 'attached' ? 'attached' : 'available'),
+    stagedAnswer: existing?.stagedAnswer,
+    skippedAt: existing?.skippedAt,
+    expiresAt: existing?.expiresAt,
+    capturedAt: existing?.capturedAt,
+    attachedAt: existing?.attachedAt,
+    answerSource: existing?.answerSource,
+    revision: Math.max(existing?.revision ?? 0, pending.revision ?? thread.revision ?? 0),
   };
-  return { ...thread, rounds: [...rounds.filter((round) => round.id !== id), value] };
+  return { ...thread, rounds: existing ? rounds.map((round) => round.id === id ? value : round) : [...rounds, value] };
 }
 
 export function answerForRound(thread: LocalThread, roundId: string): LocalMessage | undefined {

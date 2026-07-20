@@ -6,21 +6,25 @@ import { defaultSelectedRoundIds, isSelectableRound, validSelectedRoundIds } fro
 import { WorkspaceControlHeader } from './workspace-control-header';
 import { WorkspaceStatusView } from './workspace-status-view';
 import type { WorkspaceControlDerivedState } from './workspace-control-state';
+import type { WorkspaceThreadListItem } from './workspace-thread-list';
+import { buildWorkspaceThreadList } from './workspace-thread-list';
 
 type View = 'status' | 'continue' | 'rounds';
 export interface ContinueWorkspaceResult { ok: boolean; captureFailed?: boolean; error?: string; }
 
-export function WorkspaceControlCard({ record, records, rounds, state, expanded, busy, error, selectionSummary,
-  onToggleExpanded, onSwitch, onPrimary, onReturn, onContinue, onAttachRounds, onClearSelection,
+export function WorkspaceControlCard({ record, threads: suppliedThreads, records, rounds, state, expanded, busy, error, selectionSummary,
+  onToggleExpanded, onSwitch, onReturnThread, onDeleteThread, onPrimary, onReturn, onContinue, onAttachRounds, onClearSelection,
   onAttachOnly, onUnlink, onCopyPrompt, onOpenRoundSelection, debugInfo, otherActiveCount = 0 }: {
-  record: PendingAssociation; records: PendingAssociation[]; rounds: SelectableRound[]; state: WorkspaceControlDerivedState; expanded: boolean;
-  busy: boolean; error?: string; selectionSummary?: string; onToggleExpanded(): void; onSwitch(id: string): void;
+  record: PendingAssociation; threads?: WorkspaceThreadListItem[]; records?: PendingAssociation[]; rounds: SelectableRound[]; state: WorkspaceControlDerivedState; expanded: boolean;
+  busy: boolean; error?: string; selectionSummary?: string; onToggleExpanded(): void; onSwitch(threadId: string): void;
+  onReturnThread?(threadId: string): void; onDeleteThread?(threadId: string): void;
   onPrimary(): void; onReturn(): void; onContinue(question: string, skipCapture?: boolean): Promise<boolean | ContinueWorkspaceResult>;
   onAttachRounds(ids: string[]): Promise<boolean>;
   onClearSelection(): void; onAttachOnly(): void; onUnlink(): void; onCopyPrompt(): void; debugInfo?: string;
   onOpenRoundSelection?(): Promise<void>;
   otherActiveCount?: number;
 }) {
+  const threads = suppliedThreads ?? buildWorkspaceThreadList(records ?? [record]);
   const [view, setView] = useState<View>('status');
   const [question, setQuestion] = useState('');
   const [continueError, setContinueError] = useState<string>();
@@ -52,13 +56,15 @@ export function WorkspaceControlCard({ record, records, rounds, state, expanded,
   const validSelected = validSelectedRoundIds(rounds, selected);
 
   if (!expanded) return <aside role="complementary" aria-label="PointAsk 当前局部线程" className="pointask-workspace-control pointask-collapsed">
-    <WorkspaceControlHeader record={record} records={records} expanded={false} onToggle={onToggleExpanded} onSwitch={onSwitch} />
+    <WorkspaceControlHeader selectedThreadId={record.localThread.id} threads={threads} expanded={false} onToggle={onToggleExpanded}
+      onSwitch={onSwitch} onReturnThread={onReturnThread} onDeleteThread={onDeleteThread} />
     <div className="pointask-collapsed-status" aria-live="polite">{error && <span className="pointask-collapsed-error" title={error}>● </span>}{state.label}
       {otherActiveCount > 0 && <small>另有 {otherActiveCount} 个待处理追问</small>}</div>
   </aside>;
 
   return <aside role="complementary" aria-label="PointAsk 当前局部线程" className="pointask-workspace-control">
-    <WorkspaceControlHeader record={record} records={records} expanded onToggle={onToggleExpanded} onSwitch={onSwitch} />
+    <WorkspaceControlHeader selectedThreadId={record.localThread.id} threads={threads} expanded onToggle={onToggleExpanded}
+      onSwitch={onSwitch} onReturnThread={onReturnThread} onDeleteThread={onDeleteThread} />
     <div className="pointask-control-space-title">共享追问空间</div>
     {otherActiveCount > 0 && <div className="pointask-control-other-count">另有 {otherActiveCount} 个待处理追问</div>}
     <div id="pointask-workspace-control-body" className="pointask-control-body">

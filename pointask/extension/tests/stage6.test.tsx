@@ -10,6 +10,7 @@ import { InlineThreadManager } from '../src/content/inline-thread-manager';
 import type { LocalMessage, LocalThread, TextAnchor } from '../src/shared/local-thread';
 import { MemoryStorageDriver } from '../src/storage/storage-driver';
 import { ThreadStore } from '../src/storage/thread-store';
+import { syncPendingRound } from '../src/shared/thread-rounds';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -355,6 +356,21 @@ describe('multi-turn prompt and thread flow', () => {
 });
 
 describe('conversation association conflicts and restoration', () => {
+  it('updates the explicitly addressed fourth round in place without moving the third round', () => {
+    const base = attachedThread();
+    const messages = ['q1', 'q2', 'q3', 'q4'].map((id) => ({ id: `message-${id}`, roundId: id, role: 'user' as const,
+      content: [{ type: 'text' as const, content: id }], attachedManually: false, createdAt: timestamp }));
+    const rounds = ['q1', 'q2', 'q3', 'q4'].map((id) => ({ id, questionMessageId: `message-${id}`, pendingId: `pending-${id}`,
+      promptHash: `hash-${id}`, assistantFingerprintsBefore: [], status: 'waiting_for_answer' as const,
+      persistenceStatus: 'not_captured' as const, attachmentStatus: 'available' as const, createdAt: timestamp, updatedAt: timestamp }));
+    const thread: LocalThread = { ...base, messages, rounds, status: 'waiting_for_answer' };
+    const current: PendingThread = { ...pending('pending-q4'), threadId: thread.id, roundId: 'q4', promptHash: 'hash-q4',
+      status: 'generating', revision: 7 };
+    const updated = syncPendingRound(thread, current);
+    expect(updated.rounds?.map((round) => round.id)).toEqual(['q1', 'q2', 'q3', 'q4']);
+    expect(updated.rounds?.find((round) => round.id === 'q4')).toMatchObject({ pendingId: 'pending-q4', status: 'generating' });
+    expect(updated.rounds?.find((round) => round.id === 'q3')?.pendingId).toBe('pending-q3');
+  });
   it('recognizes the newest answer on its explicitly mapped round instead of the previous round', () => {
     const coordinator = new PendingAssociationCoordinator(() => new Date(timestamp));
     const value = { ...pending('workspace-round-map'), threadId: 'workspace-round-map', roundId: 'round-2',
@@ -547,7 +563,7 @@ describe('conversation association conflicts and restoration', () => {
     const coordinator = new PendingAssociationCoordinator(() => new Date(timestamp));
     coordinator.create(pending(), 7, attachedThread());
     const restored = coordinator.forSourceTab(7)[0];
-    expect(restored?.localThread).toEqual(attachedThread());
+    expect(restored?.localThread).toEqual({ ...attachedThread(), revision: 1 });
     expect(restored?.pendingThread.targetConversationUrl).toBe('https://chatgpt.com/c/target');
   });
 });

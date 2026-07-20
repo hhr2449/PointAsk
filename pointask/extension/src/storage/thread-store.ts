@@ -21,18 +21,29 @@ export class ThreadStore {
     return (await this.list()).filter((thread) => thread.sourceConversationKey === conversationKey);
   }
   async upsert(thread: LocalThread): Promise<void> {
-    await this.mutate((threads) => cleanupThreads([...threads.filter((item) => item.id !== thread.id), thread], Date.now()).threads);
+    await this.mutate((threads) => {
+      const existing = threads.find((item) => item.id === thread.id);
+      if ((existing?.revision ?? 0) > (thread.revision ?? 0)) return threads;
+      return cleanupThreads([...threads.filter((item) => item.id !== thread.id), thread], Date.now()).threads;
+    });
   }
-  async upsertAssociation(thread: LocalThread, pending: PendingThread): Promise<void> {
-    await withStorageLock('association', async () => {
+  async upsertAssociation(thread: LocalThread, pending: PendingThread): Promise<boolean> {
+    return withStorageLock('pointask-data', async () => {
       const raw = await this.driver.get([STORAGE_KEYS.threads, STORAGE_KEYS.pendingThreads, STORAGE_KEYS.schemaVersion]);
       const schema = migrateStorage(raw); const threadId = pending.threadId || pending.id;
+      const currentThread = schema.threads.find((item) => item.id === thread.id);
+      const currentPendingRevision = schema.pendingThreads.filter((item) => (item.threadId || item.id) === threadId)
+        .reduce((highest, item) => Math.max(highest, item.revision ?? 0), 0);
+      const currentRevision = Math.max(currentThread?.revision ?? 0, currentPendingRevision);
+      const incomingRevision = Math.max(thread.revision ?? 0, pending.revision ?? 0);
+      if (incomingRevision < currentRevision) return false;
       const cleaned = cleanupThreads([...schema.threads.filter((item) => item.id !== thread.id), thread], Date.now()).threads;
       await this.driver.set({
         [STORAGE_KEYS.threads]: cleaned,
         [STORAGE_KEYS.pendingThreads]: [...schema.pendingThreads.filter((item) => (item.threadId || item.id) !== threadId), pending],
         [STORAGE_KEYS.schemaVersion]: STORAGE_SCHEMA_VERSION,
       });
+      return true;
     });
   }
   async delete(id: string): Promise<boolean> {
@@ -44,7 +55,7 @@ export class ThreadStore {
     return deleted;
   }
   async cleanupExpiredStagedAnswers(now = Date.now()): Promise<number> {
-    return withStorageLock('threads', async () => {
+    return withStorageLock('pointask-data', async () => {
       const raw = await this.driver.get([STORAGE_KEYS.threads, STORAGE_KEYS.schemaVersion]);
       const threads = migrateStorage(raw).threads;
       const before = threads.flatMap((thread) => thread.rounds ?? []).filter((round) => round.stagedAnswer).length;
@@ -85,7 +96,7 @@ export class ThreadStore {
     return this.driver.subscribe?.(STORAGE_KEYS.threads, callback) ?? (() => undefined);
   }
   private async mutate(change: (threads: LocalThread[]) => LocalThread[]): Promise<void> {
-    this.queue = this.queue.then(async () => withStorageLock('threads', async () => this.write(change(await this.list()))));
+    this.queue = this.queue.then(async () => withStorageLock('pointask-data', async () => this.write(change(await this.list()))));
     await this.queue;
   }
   private write(threads: LocalThread[]): Promise<void> {

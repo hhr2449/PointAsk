@@ -24,6 +24,7 @@ export interface PendingAssociation {
   associationStatus: AssociationStatus;
   createdAt: string;
   updatedAt: string;
+  revision?: number;
 }
 
 export type PointAskRuntimeMessage =
@@ -51,6 +52,8 @@ export type PointAskRuntimeMessage =
   | { type: 'pointask:candidate-answer-state'; pendingThreadId: string; fingerprint: string; streaming: boolean }
   | { type: 'pointask:open-workspace-context-update'; workspaceId: string }
   | { type: 'pointask:reserve-prompt-submission'; pendingThreadId: string; promptHash: string; targetUrl: string }
+  | { type: 'pointask:mark-submission-started'; pendingThreadId: string; promptHash: string; targetUrl: string }
+  | { type: 'pointask:mark-submission-unknown'; pendingThreadId: string; promptHash: string; targetUrl: string }
   | { type: 'pointask:release-prompt-submission'; pendingThreadId: string; promptHash: string };
 
 const messageTypes = new Set([
@@ -77,6 +80,8 @@ const messageTypes = new Set([
   'pointask:candidate-answer-state',
   'pointask:open-workspace-context-update',
   'pointask:reserve-prompt-submission',
+  'pointask:mark-submission-started',
+  'pointask:mark-submission-unknown',
   'pointask:release-prompt-submission',
 ]);
 
@@ -100,7 +105,7 @@ export function isPendingThread(value: unknown): value is PendingThread {
     'generatedPrompt', 'promptMode', 'status', 'createdAt', 'updatedAt', 'targetConversationUrl',
     'displayId', 'answerMode', 'workspaceId',
     'threadId', 'roundId', 'targetTabId', 'targetConversationKey', 'promptHash', 'assistantFingerprintsBefore',
-    'candidateAnswerFingerprint', 'richSelection', 'viewAnchor', 'submittedPromptHash', 'submittedAt',
+    'candidateAnswerFingerprint', 'richSelection', 'viewAnchor', 'submittedPromptHash', 'submittedAt', 'revision', 'operationId',
   ]) && hasOnlyKeys(anchor, [
     'pageUrl', 'sourcePageUrl', 'conversationKey', 'messageFingerprint', 'assistantMessageHash', 'selectedText',
     'prefixText', 'suffixText', 'paragraphText', 'paragraphHash', 'startOffset', 'endOffset', 'blockIndex',
@@ -113,7 +118,7 @@ export function isPendingThread(value: unknown): value is PendingThread {
     typeof anchor.startOffset === 'number' && typeof anchor.endOffset === 'number' &&
     typeof anchor.schemaVersion === 'number' &&
     (value.promptMode === 'compact' || value.promptMode === 'contextual') &&
-    ['prompt_ready', 'waiting_for_submission', 'generating', 'answer_ready', 'waiting_for_answer', 'answer_attached', 'failed'].includes(String(value.status)) &&
+    ['prompt_ready', 'waiting_for_submission', 'submitting', 'submission_unknown', 'generating', 'answer_ready', 'waiting_for_answer', 'answer_attached', 'failed'].includes(String(value.status)) &&
     ['workspace', 'current_conversation', 'dedicated_branch'].includes(String(value.answerMode)) &&
     /^PA-\d{3,}$/.test(String(value.displayId)) &&
     (value.workspaceId === undefined || isNonEmptyString(value.workspaceId)) &&
@@ -126,6 +131,8 @@ export function isPendingThread(value: unknown): value is PendingThread {
     (value.candidateAnswerFingerprint === undefined || isNonEmptyString(value.candidateAnswerFingerprint)) &&
     (value.submittedPromptHash === undefined || isNonEmptyString(value.submittedPromptHash)) &&
     (value.submittedAt === undefined || isNonEmptyString(value.submittedAt) && Number.isFinite(Date.parse(value.submittedAt))) &&
+    (value.revision === undefined || typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision >= 0) &&
+    (value.operationId === undefined || isNonEmptyString(value.operationId)) &&
     (value.richSelection === undefined || isRichSelection(value.richSelection)) &&
     (value.viewAnchor === undefined || isViewAnchor(value.viewAnchor)) &&
     isChatGptUrl(value.sourcePageUrl as string) && isChatGptUrl(value.sourceConversationKey as string) &&
@@ -160,6 +167,8 @@ export function isPointAskRuntimeMessage(value: unknown): value is PointAskRunti
     case 'pointask:delete-thread-data':
       return hasOnlyKeys(value, ['type', 'threadId']) && isNonEmptyString(value.threadId);
     case 'pointask:reserve-prompt-submission':
+    case 'pointask:mark-submission-started':
+    case 'pointask:mark-submission-unknown':
       return hasOnlyKeys(value, ['type', 'pendingThreadId', 'promptHash', 'targetUrl']) && isNonEmptyString(value.pendingThreadId) &&
         isNonEmptyString(value.promptHash) && isNonEmptyString(value.targetUrl) && isChatGptUrl(value.targetUrl);
     case 'pointask:release-prompt-submission':
@@ -289,6 +298,13 @@ export function isCompatibleChatGptTargetUrl(storedValue: string, currentValue: 
   return storedPath === currentPath || (storedPath === '/' && /^\/c\/[^/]+$/.test(currentPath));
 }
 
+/** Stable conversation identity; unlike routing compatibility, '/' never aliases a /c/... conversation. */
+export function isSameChatGptConversationUrl(leftValue: string, rightValue: string): boolean {
+  if (!isChatGptUrl(leftValue) || !isChatGptUrl(rightValue)) return false;
+  const normalizePath = (pathname: string) => pathname.replace(/\/+$/, '') || '/';
+  return normalizePath(new URL(leftValue).pathname) === normalizePath(new URL(rightValue).pathname);
+}
+
 export function isPendingAssociationUpdate(value: unknown): value is {
   type: 'pointask:pending-thread-updated';
   record: PendingAssociation;
@@ -298,12 +314,13 @@ export function isPendingAssociationUpdate(value: unknown): value is {
   if (!isRecord(record) || !isPendingThread(record.pendingThread) || !isLocalThread(record.localThread) ||
     (record.pendingThread.threadId || record.pendingThread.id) !== record.localThread.id) return false;
   return hasOnlyKeys(record, [
-    'pendingThread', 'localThread', 'sourceTabId', 'targetTabId', 'targetConversationUrl', 'associationStatus', 'createdAt', 'updatedAt',
+    'pendingThread', 'localThread', 'sourceTabId', 'targetTabId', 'targetConversationUrl', 'associationStatus', 'createdAt', 'updatedAt', 'revision',
   ]) && typeof record.sourceTabId === 'number' &&
     (record.targetTabId === undefined || typeof record.targetTabId === 'number') &&
     (record.targetConversationUrl === undefined || (isNonEmptyString(record.targetConversationUrl) && isChatGptUrl(record.targetConversationUrl))) &&
     ['created', 'target_opened', 'awaiting_manual_association', 'associated', 'completed', 'cancelled'].includes(String(record.associationStatus)) &&
-    isNonEmptyString(record.createdAt) && isNonEmptyString(record.updatedAt);
+    isNonEmptyString(record.createdAt) && isNonEmptyString(record.updatedAt) &&
+    (record.revision === undefined || typeof record.revision === 'number' && Number.isSafeInteger(record.revision) && record.revision >= 0);
 }
 
 export function isLocalThread(value: unknown): value is LocalThread {
@@ -312,7 +329,7 @@ export function isLocalThread(value: unknown): value is LocalThread {
   if (!hasOnlyKeys(value, [
     'id', 'anchor', 'sourcePageUrl', 'sourceConversationKey', 'sourceMessageFingerprint', 'targetConversationUrl',
     'messages', 'status', 'createdAt', 'updatedAt', 'expanded', 'collapsedRoundIds', 'displayId', 'answerMode', 'workspaceId',
-    'dedicatedConversationUrl', 'richSelection', 'rounds',
+    'dedicatedConversationUrl', 'richSelection', 'rounds', 'revision',
   ])) return false;
   if (!['id', 'sourcePageUrl', 'sourceConversationKey', 'sourceMessageFingerprint', 'createdAt', 'updatedAt', 'displayId', 'answerMode']
     .every((key) => isNonEmptyString(value[key]))) return false;
@@ -324,19 +341,20 @@ export function isLocalThread(value: unknown): value is LocalThread {
     !['pageUrl', 'selectedText', 'paragraphText', 'paragraphHash', 'messageFingerprint', 'assistantMessageHash', 'conversationKey', 'sourcePageUrl', 'createdAt']
       .every((key) => isNonEmptyString(anchor[key]))) return false;
   if (typeof anchor.startOffset !== 'number' || typeof anchor.endOffset !== 'number' || typeof anchor.schemaVersion !== 'number') return false;
-  if (!['draft', 'prompt_ready', 'waiting_for_submission', 'waiting_for_answer', 'generating', 'answer_ready', 'answer_attached', 'failed', 'orphaned'].includes(String(value.status))) return false;
+  if (!['draft', 'prompt_ready', 'waiting_for_submission', 'submitting', 'submission_unknown', 'waiting_for_answer', 'generating', 'answer_ready', 'answer_attached', 'failed', 'orphaned'].includes(String(value.status))) return false;
   if (!['workspace', 'current_conversation', 'dedicated_branch'].includes(String(value.answerMode))) return false;
   if (!/^PA-\d{3,}$/.test(String(value.displayId)) || (value.workspaceId !== undefined && !isNonEmptyString(value.workspaceId))) return false;
   if (value.expanded !== undefined && typeof value.expanded !== 'boolean') return false;
+  if (value.revision !== undefined && (typeof value.revision !== 'number' || !Number.isSafeInteger(value.revision) || value.revision < 0)) return false;
   if (value.collapsedRoundIds !== undefined && (!Array.isArray(value.collapsedRoundIds) || !value.collapsedRoundIds.every(isNonEmptyString))) return false;
   if (value.rounds !== undefined && (!Array.isArray(value.rounds) || !value.rounds.every((raw) => {
     if (!isRecord(raw) || !hasOnlyKeys(raw, ['id', 'questionMessageId', 'answerMessageId', 'pendingId', 'promptHash', 'assistantFingerprintsBefore', 'candidateAnswerFingerprint',
-      'status', 'persistenceStatus', 'attachmentStatus', 'stagedAnswer', 'skippedAt', 'expiresAt', 'capturedAt', 'attachedAt', 'answerSource', 'createdAt', 'updatedAt'])) return false;
+      'status', 'persistenceStatus', 'attachmentStatus', 'stagedAnswer', 'skippedAt', 'expiresAt', 'capturedAt', 'attachedAt', 'answerSource', 'createdAt', 'updatedAt', 'revision'])) return false;
     return ['id', 'pendingId', 'promptHash', 'createdAt', 'updatedAt'].every((key) => isNonEmptyString(raw[key])) &&
       (raw.questionMessageId === undefined || isNonEmptyString(raw.questionMessageId)) &&
       (raw.answerMessageId === undefined || isNonEmptyString(raw.answerMessageId)) &&
       Array.isArray(raw.assistantFingerprintsBefore) && raw.assistantFingerprintsBefore.every(isNonEmptyString) &&
-      ['waiting_for_submission', 'waiting_for_answer', 'generating', 'answer_ready', 'failed', 'attached'].includes(String(raw.status)) &&
+      ['waiting_for_submission', 'submitting', 'submission_unknown', 'waiting_for_answer', 'generating', 'answer_ready', 'failed', 'attached'].includes(String(raw.status)) &&
       ['not_captured', 'staged', 'attaching', 'attached', 'capture_failed'].includes(String(raw.persistenceStatus)) &&
       (raw.attachmentStatus === undefined || ['available', 'skipped_retained', 'skipped_expired', 'attached'].includes(String(raw.attachmentStatus))) &&
       (raw.stagedAnswer === undefined || isRichContent(raw.stagedAnswer)) &&
@@ -347,6 +365,7 @@ export function isLocalThread(value: unknown): value is LocalThread {
       (raw.attachedAt === undefined || isNonEmptyString(raw.attachedAt) && Number.isFinite(Date.parse(raw.attachedAt))) &&
       (raw.answerSource === undefined || isAnswerSource(raw.answerSource)) &&
       Number.isFinite(Date.parse(String(raw.createdAt))) && Number.isFinite(Date.parse(String(raw.updatedAt))) &&
+      (raw.revision === undefined || typeof raw.revision === 'number' && Number.isSafeInteger(raw.revision) && raw.revision >= 0) &&
       (raw.persistenceStatus !== 'staged' || isRichContent(raw.stagedAnswer) && isAnswerSource(raw.answerSource)) &&
       (raw.persistenceStatus === 'staged' || raw.stagedAnswer === undefined);
   }))) return false;

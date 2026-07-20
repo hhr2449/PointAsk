@@ -192,18 +192,22 @@ export class InlineThreadManager {
         persistenceStatus: 'not_captured',
         attachmentStatus: 'available',
         createdAt: timestamp, updatedAt: timestamp,
+        revision: pending.revision,
       }],
       targetConversationUrl: answerMode === 'current_conversation' ? data.sourcePageUrl : workspace?.targetConversationUrl,
       status: 'prompt_ready',
       createdAt: timestamp,
       updatedAt: timestamp,
+      revision: pending.revision,
     };
     this.mount(thread, data.anchorElement);
     if (this.expandNewThreads) this.expandedIds.add(thread.id);
     else this.expandedIds.delete(thread.id);
     thread.expanded = this.expandedIds.has(thread.id);
     this.renderAll();
-    await Promise.all([this.threadStore?.upsert(thread), this.pendingStore?.upsert(pending), this.metrics?.increment('questionsCreated')]);
+    if (this.threadStore && this.pendingStore) await this.threadStore.upsertAssociation(thread, pending);
+    else await Promise.all([this.threadStore?.upsert(thread), this.pendingStore?.upsert(pending)]);
+    await this.metrics?.increment('questionsCreated');
     return thread.id;
   }
 
@@ -217,7 +221,7 @@ export class InlineThreadManager {
         await this.webBridge.savePendingThread(pending, item.thread);
         const record = await this.webBridge.associateCurrentPage(pending.id, item.thread.sourcePageUrl, true);
         const waiting = this.pendingThreads.markWaitingForSubmission(id);
-        item.thread = { ...record.localThread, status: 'waiting_for_submission' };
+        item.thread = { ...record.localThread, status: 'waiting_for_submission', revision: waiting?.revision ?? record.localThread.revision };
         if (waiting) await this.webBridge.updateLocalThread(waiting, item.thread);
         void Promise.all([this.threadStore?.upsert(item.thread), waiting && this.pendingStore?.upsert(waiting)]);
         this.render(id);
@@ -244,7 +248,7 @@ export class InlineThreadManager {
     if (pending.submittedPromptHash === pending.promptHash) return;
     const failedPending = this.pendingThreads.markFailed(id);
     if (!failedPending) return;
-    item.thread = { ...item.thread, status: 'failed', updatedAt: this.now().toISOString() };
+    item.thread = { ...item.thread, status: 'failed', updatedAt: this.now().toISOString(), revision: failedPending.revision };
     await Promise.all([
       this.threadStore?.upsert(item.thread),
       this.pendingStore?.upsert(failedPending),
@@ -361,7 +365,8 @@ export class InlineThreadManager {
   next(id: string): void {
     const item = this.mounted.get(id);
     if (!item || !this.pendingThreads.markWaitingForAnswer(id)) return;
-    item.thread = { ...item.thread, status: 'waiting_for_answer', updatedAt: this.now().toISOString() };
+    const waiting = this.pendingThreads.get(id);
+    item.thread = { ...item.thread, status: 'waiting_for_answer', updatedAt: this.now().toISOString(), revision: waiting?.revision };
     this.render(id);
   }
 
@@ -400,8 +405,9 @@ export class InlineThreadManager {
     if (pending.submittedPromptHash === pending.promptHash) { item.error = '该问题已经发送'; this.render(id); return false; }
     this.sendingIds.add(id); item.error = undefined;
     pending = this.pendingThreads.markWaitingForSubmission(id) ?? pending;
-    item.thread = { ...item.thread, status: 'waiting_for_submission', updatedAt: this.now().toISOString() };
+    item.thread = { ...item.thread, status: 'waiting_for_submission', updatedAt: this.now().toISOString(), revision: pending.revision };
     this.render(id);
+    let submissionMayHaveOccurred = false;
     try {
       if (this.siteAdapter.getConversationKey() !== item.thread.sourceConversationKey) throw new Error('当前页面与线程不匹配');
       if (!this.siteAdapter.fillComposer(pending.generatedPrompt)) throw new Error('当前对话暂时无法发送，请重试');
@@ -415,10 +421,17 @@ export class InlineThreadManager {
         await this.webBridge.releasePromptSubmission(pending.id, pending.promptHash ?? '').catch(() => undefined);
         throw new Error('发送失败，请重试');
       }
+      submissionMayHaveOccurred = true;
       this.pendingThreads.restore(record.pendingThread); item.thread = record.localThread;
       void Promise.all([this.threadStore?.upsert(item.thread), this.pendingStore?.upsert(record.pendingThread)]);
       showOperationToast('已发送'); this.render(id); return true;
     } catch (error) {
+      if (submissionMayHaveOccurred) {
+        try {
+          const unknown = await this.webBridge.markSubmissionUnknown(pending.id, pending.promptHash ?? '', window.location.href);
+          this.pendingThreads.restore(unknown.pendingThread); item.thread = unknown.localThread; item.error = undefined; this.render(id); return true;
+        } catch { /* Fall through only when neither page nor storage can preserve the uncertain submission. */ }
+      }
       await this.recordSendFailure(id, error); return false;
     } finally { this.sendingIds.delete(id); this.render(id); }
   }
@@ -445,7 +458,8 @@ export class InlineThreadManager {
   cancel(id: string): void {
     const item = this.mounted.get(id); if (!item) return;
     const pending = this.pendingThreads.markFailed(id);
-    item.thread = { ...item.thread, status: item.thread.messages.at(-1)?.role === 'assistant' ? 'answer_attached' : 'failed', updatedAt: this.now().toISOString() };
+    item.thread = { ...item.thread, status: item.thread.messages.at(-1)?.role === 'assistant' ? 'answer_attached' : 'failed',
+      updatedAt: this.now().toISOString(), revision: pending?.revision };
     this.viewAnchors.get(id)?.stop(); this.viewAnchors.delete(id);
     void Promise.all([this.threadStore?.upsert(item.thread), pending && this.pendingStore?.upsert(pending)]);
     void this.webBridge?.cancel(this.pendingThreads.get(id)?.id ?? id).catch(() => undefined); this.render(id);
@@ -578,9 +592,11 @@ export class InlineThreadManager {
         promptHash: pending.promptHash ?? stableTextHash(generatedPrompt), assistantFingerprintsBefore: pending.assistantFingerprintsBefore ?? [],
         status: 'waiting_for_submission', persistenceStatus: 'not_captured', createdAt: timestamp, updatedAt: timestamp,
         attachmentStatus: 'available',
+        revision: pending.revision,
       }],
       status: 'waiting_for_submission',
       updatedAt: timestamp,
+      revision: pending.revision,
     };
     void this.metrics?.increment('followUpsContinued');
     item.copied = false;

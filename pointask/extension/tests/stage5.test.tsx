@@ -39,8 +39,8 @@ const pending = (id = 'pointask-pending-attach'): PendingThread => ({
 function association(id = 'pointask-pending-attach', sourceTab = 1, targetTab = 2) {
   const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
   coordinator.create(pending(id), sourceTab);
-  coordinator.markTargetOpened(id, targetTab, 'https://chatgpt.com/c/target');
-  coordinator.associate(id, targetTab, 'https://chatgpt.com/c/target');
+  coordinator.markTargetOpened(id, targetTab, window.location.href);
+  coordinator.associate(id, targetTab, window.location.href);
   return { coordinator, record: coordinator.get(id)! };
 }
 
@@ -110,7 +110,7 @@ describe('manual answer confirmation and storage', () => {
     vi.spyOn(adapter, 'waitForSubmitReady').mockResolvedValue(true);
     const fillComposer = vi.spyOn(adapter, 'fillComposer').mockReturnValue(true);
     const submitComposer = vi.spyOn(adapter, 'submitComposer').mockReturnValue(true);
-    const hasSubmittedPrompt = vi.spyOn(adapter, 'hasSubmittedPrompt').mockReturnValueOnce(false).mockReturnValue(true);
+    const hasSubmittedPrompt = vi.spyOn(adapter, 'hasSubmittedPrompt').mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValue(true);
     const authorize = vi.fn().mockResolvedValue(true);
     const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }), new ClipboardManager(undefined, () => false), adapter, { authorize } as never);
     act(() => manager.applyRecord(record));
@@ -126,6 +126,7 @@ describe('manual answer confirmation and storage', () => {
     expect(submitComposer).toHaveBeenCalledOnce();
     expect(hasSubmittedPrompt).toHaveBeenCalledWith(promptHash);
     expect(authorize).toHaveBeenCalledOnce();
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'pointask:mark-submission-started' }));
     expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'pointask:reserve-prompt-submission', pendingThreadId: record.pendingThread.id }));
     act(() => manager.stop());
   });
@@ -145,7 +146,7 @@ describe('manual answer confirmation and storage', () => {
     vi.spyOn(adapter, 'waitForSubmitReady').mockResolvedValue(true);
     vi.spyOn(adapter, 'fillComposer').mockReturnValue(true);
     const submitComposer = vi.spyOn(adapter, 'submitComposer').mockReturnValue(true);
-    vi.spyOn(adapter, 'hasSubmittedPrompt').mockReturnValueOnce(false).mockReturnValue(true);
+    vi.spyOn(adapter, 'hasSubmittedPrompt').mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValue(true);
     const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }), new ClipboardManager(undefined, () => false), adapter);
     act(() => manager.applyRecord(record));
     const execute = manager as unknown as { fill(id: string): Promise<boolean> };
@@ -160,7 +161,7 @@ describe('manual answer confirmation and storage', () => {
     act(() => manager.stop());
   });
 
-  it('does not reserve a submission when clicking produced no rendered user turn', async () => {
+  it('marks submission_unknown without reserving or resending when clicking produced no rendered user turn', async () => {
     vi.useFakeTimers();
     const workspace = association('workspace-editor-error').record;
     const record = { ...workspace,
@@ -189,10 +190,83 @@ describe('manual answer confirmation and storage', () => {
       await vi.advanceTimersByTimeAsync(15_100);
       success = await sending;
     });
-    expect(success).toBe(false);
+    expect(success).toBe(true);
     expect(runtime.sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'pointask:reserve-prompt-submission' }));
+    expect(runtime.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'pointask:mark-submission-unknown' }));
     act(() => manager.stop());
     vi.useRealTimers();
+  });
+
+  it('uses submission_unknown when the rendered user turn exists but the submitted-state receipt is lost', async () => {
+    const base = association('receipt-lost').record;
+    const record = { ...base,
+      pendingThread: { ...base.pendingThread, answerMode: 'workspace' as const, promptHash: 'receipt-lost-hash' },
+      localThread: { ...base.localThread, answerMode: 'workspace' as const } };
+    const unknown = { ...record,
+      pendingThread: { ...record.pendingThread, status: 'submission_unknown' as const },
+      localThread: { ...record.localThread, status: 'submission_unknown' as const } };
+    const runtime = { sendMessage: vi.fn().mockImplementation((message: { type: string }) => Promise.resolve(
+      message.type === 'pointask:reserve-prompt-submission'
+        ? { ok: false, error: 'response port closed' }
+        : { ok: true, data: unknown })) };
+    const adapter = new ChatGptAdapter();
+    vi.spyOn(adapter, 'waitForComposerReady').mockResolvedValue(true);
+    vi.spyOn(adapter, 'fillComposer').mockReturnValue(true);
+    vi.spyOn(adapter, 'waitForSubmitReady').mockResolvedValue(true);
+    vi.spyOn(adapter, 'hasSubmittedPrompt').mockReturnValue(true);
+    const submit = vi.spyOn(adapter, 'submitComposer');
+    const manager = new PendingBannerManager(new WebConversationBridge(runtime), new ClipboardManager(undefined, () => false), adapter);
+    act(() => manager.applyRecord(record));
+    let success = false;
+    await act(async () => { success = await (manager as unknown as { fill(id: string): Promise<boolean> }).fill(record.pendingThread.id); });
+    expect(success).toBe(true); expect(submit).not.toHaveBeenCalled();
+    expect(runtime.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'pointask:mark-submission-unknown' }));
+    expect(document.querySelector('pointask-pending-thread-banner')?.shadowRoot?.textContent).toContain('正在确认发送');
+    act(() => manager.stop());
+  });
+
+  it('clears a stale send failure and exposes attachment when the matching answer is recognized', async () => {
+    document.body.innerHTML = chatGptFixture;
+    const adapter = new ChatGptAdapter();
+    const candidateElement = document.querySelector<HTMLElement>('[data-testid="conversation-turn-2"]')!;
+    const candidate = { element: candidateElement, fingerprint: adapter.getMessageFingerprint(candidateElement), streaming: false };
+    const base = association('send-reconciled').record;
+    let current: PendingAssociation = {
+      ...base,
+      pendingThread: { ...base.pendingThread, answerMode: 'workspace', promptHash: 'send-reconciled-hash' },
+      localThread: { ...base.localThread, answerMode: 'workspace' },
+    };
+    vi.spyOn(adapter, 'waitForComposerReady').mockResolvedValue(true);
+    vi.spyOn(adapter, 'fillComposer').mockReturnValue(true);
+    vi.spyOn(adapter, 'waitForSubmitReady').mockResolvedValue(true);
+    vi.spyOn(adapter, 'submitComposer').mockReturnValue(false);
+    const findCandidate = vi.spyOn(adapter, 'findCandidateAnswer').mockReturnValue(null);
+    const sendMessage = vi.fn().mockImplementation((message: { type: string }) => {
+      if (message.type === 'pointask:candidate-answer-state') current = {
+        ...current,
+        pendingThread: { ...current.pendingThread, status: 'answer_ready', submittedPromptHash: current.pendingThread.promptHash,
+          candidateAnswerFingerprint: candidate.fingerprint },
+        localThread: { ...current.localThread, status: 'answer_ready', rounds: current.localThread.rounds?.map((round) => ({
+          ...round, status: 'answer_ready' as const, candidateAnswerFingerprint: candidate.fingerprint,
+        })) },
+      };
+      return Promise.resolve({ ok: true, data: current });
+    });
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }), new ClipboardManager(undefined, () => false), adapter);
+    act(() => manager.applyRecord(current));
+    await act(async () => { await (manager as unknown as { fill(id: string): Promise<boolean> }).fill(current.pendingThread.id); });
+    expect(document.querySelector('pointask-pending-thread-banner')?.shadowRoot?.textContent).toContain('发送失败，请重试');
+
+    findCandidate.mockReturnValue(candidate);
+    await act(async () => {
+      (manager as unknown as { refreshCandidates(): void }).refreshCandidates();
+      await Promise.resolve(); await Promise.resolve();
+    });
+    const text = document.querySelector('pointask-pending-thread-banner')?.shadowRoot?.textContent;
+    expect(text).not.toContain('发送失败，请重试');
+    expect(text).toContain('附加本轮并返回');
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'pointask:candidate-answer-state' }));
+    act(() => manager.stop());
   });
 
   it('keeps a current-conversation pending out of generic attachment choices and the top-right banner', () => {
@@ -200,7 +274,7 @@ describe('manual answer confirmation and storage', () => {
     const current = association().record;
     act(() => manager.applyRecord({ ...current, pendingThread: { ...current.pendingThread, answerMode: 'current_conversation' },
       localThread: { ...current.localThread, answerMode: 'current_conversation', status: 'waiting_for_answer' } }));
-    expect((document.querySelector('pointask-pending-thread-banner') as HTMLElement).style.display).toBe('none');
+    expect(document.querySelector('pointask-pending-thread-banner')).toBeNull();
     expect(manager.getAttachmentAssociations()).toHaveLength(0);
     act(() => manager.stop());
   });
@@ -210,7 +284,7 @@ describe('manual answer confirmation and storage', () => {
     const current = association().record;
     act(() => manager.applyRecord({ ...current, pendingThread: { ...current.pendingThread, status: 'answer_attached' },
       localThread: { ...current.localThread, answerMode: 'current_conversation', status: 'answer_attached' } }));
-    expect((document.querySelector('pointask-pending-thread-banner') as HTMLElement).style.display).toBe('none');
+    expect(document.querySelector('pointask-pending-thread-banner')).toBeNull();
     act(() => manager.stop());
   });
 
@@ -373,7 +447,7 @@ describe('manual answer confirmation and storage', () => {
         promptHash: 'hash-3', status: 'answer_ready' },
       localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready', messages: ['q1', 'q2', 'q3'].map((id) => ({
         id, role: 'user' as const, content: [{ type: 'text' as const, content: `问题-${id}` }], attachedManually: false, createdAt: base.createdAt,
-      })), rounds: ['q1', 'q2', 'q3'].map((id, index) => ({ id, pendingId: `pending-${id}`, promptHash: `hash-${index + 1}`,
+      })), rounds: ['q1', 'q2', 'q3'].map((id, index) => ({ id, pendingId: id === 'q3' ? base.pendingThread.id : `pending-${id}`, promptHash: `hash-${index + 1}`,
         assistantFingerprintsBefore: [], status: 'answer_ready' as const, persistenceStatus: id === 'q1' ? 'not_captured' as const : 'staged' as const,
         stagedAnswer: id === 'q1' ? undefined : [{ type: 'text' as const, content: `回答-${id}` }],
         answerSource: id === 'q1' ? undefined : { conversationUrl: 'https://chatgpt.com/c/target', conversationKey: 'https://chatgpt.com/c/target', messageFingerprint: `answer-${id.slice(1)}` },
@@ -419,7 +493,7 @@ describe('manual answer confirmation and storage', () => {
       pendingThread: { ...base.pendingThread, threadId: base.localThread.id, roundId: 'q3', answerMode: 'workspace', promptHash: 'hash-3', status: 'answer_ready' },
       localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready', messages: ['q2', 'q3'].map((id) => ({
         id, role: 'user' as const, content: [{ type: 'text' as const, content: `问题-${id}` }], attachedManually: false, createdAt: base.createdAt,
-      })), rounds: ['q2', 'q3'].map((id) => ({ id, pendingId: `pending-${id}`, promptHash: `hash-${id.slice(1)}`,
+      })), rounds: ['q2', 'q3'].map((id) => ({ id, pendingId: id === 'q3' ? base.pendingThread.id : `pending-${id}`, promptHash: `hash-${id.slice(1)}`,
         assistantFingerprintsBefore: [], status: 'answer_ready' as const, persistenceStatus: 'staged' as const,
         stagedAnswer: id === 'q3' ? [] : [{ type: 'text' as const, content: `回答-${id}` }],
         answerSource: { conversationUrl: 'https://chatgpt.com/c/target', conversationKey: 'https://chatgpt.com/c/target', messageFingerprint: `answer-${id.slice(1)}` },
@@ -497,24 +571,33 @@ describe('manual answer confirmation and storage', () => {
     act(() => manager.stop());
   });
 
-  it('continues in the same Workspace thread with a new round and never attaches the previous answer', async () => {
+  it('stages the fourth round before creating the fifth and never attaches an earlier answer', async () => {
     document.body.innerHTML = chatGptFixture;
     const adapter = new ChatGptAdapter();
     const answer = document.querySelector<HTMLElement>('[data-testid="conversation-turn-2"]')!;
     const fingerprint = adapter.getMessageFingerprint(answer);
     const base = association('workspace-continue-only').record;
-    const firstRoundId = base.localThread.messages[0]!.id;
+    const roundIds = ['round-1', 'round-2', 'round-3', 'round-4'];
+    const currentRoundId = roundIds[3]!;
     let current: PendingAssociation = {
       ...base,
-      pendingThread: { ...base.pendingThread, threadId: base.localThread.id, roundId: firstRoundId, answerMode: 'workspace',
-        promptHash: 'workspace-first-hash', candidateAnswerFingerprint: fingerprint, status: 'answer_ready', targetConversationUrl: window.location.href },
+      pendingThread: { ...base.pendingThread, threadId: base.localThread.id, roundId: currentRoundId, answerMode: 'workspace',
+        promptHash: 'workspace-hash-4', candidateAnswerFingerprint: fingerprint, status: 'answer_ready', targetConversationUrl: window.location.href },
       targetConversationUrl: window.location.href,
-      localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready', targetConversationUrl: window.location.href, rounds: [{ id: firstRoundId,
-        pendingId: base.pendingThread.id, promptHash: 'workspace-first-hash', assistantFingerprintsBefore: [],
-        candidateAnswerFingerprint: fingerprint, status: 'answer_ready', persistenceStatus: 'not_captured',
-        createdAt: base.createdAt, updatedAt: base.updatedAt }] },
+      localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready', targetConversationUrl: window.location.href,
+        messages: roundIds.map((roundId, index) => ({ id: `message-${roundId}`, roundId, role: 'user' as const,
+          content: [{ type: 'text' as const, content: `第 ${index + 1} 轮问题` }], attachedManually: false, createdAt: base.createdAt })),
+        rounds: roundIds.map((roundId, index) => ({ id: roundId, questionMessageId: `message-${roundId}`,
+          pendingId: roundId === currentRoundId ? base.pendingThread.id : `pending-${roundId}`,
+          promptHash: `workspace-hash-${index + 1}`, assistantFingerprintsBefore: [],
+          candidateAnswerFingerprint: roundId === currentRoundId ? fingerprint : `answer-${roundId}`,
+          status: 'answer_ready' as const, persistenceStatus: roundId === currentRoundId ? 'not_captured' as const : 'staged' as const,
+          ...(roundId === currentRoundId ? {} : { stagedAnswer: [{ type: 'text' as const, content: `回答-${roundId}` }], answerSource: {
+            conversationUrl: window.location.href, conversationKey: window.location.href, messageFingerprint: `answer-${roundId}`,
+          } }), createdAt: base.createdAt, updatedAt: base.updatedAt })) },
     };
-    vi.spyOn(adapter, 'findCandidateAnswer').mockReturnValue({ element: answer, fingerprint, streaming: false });
+    vi.spyOn(adapter, 'findCandidateAnswer').mockImplementation((hash) => hash === 'workspace-hash-4'
+      ? { element: answer, fingerprint, streaming: false } : null);
     vi.spyOn(adapter, 'getAssistantMessageFingerprints').mockReturnValue([fingerprint]);
     vi.spyOn(adapter, 'waitForComposerReady').mockResolvedValue(true);
     vi.spyOn(adapter, 'waitForSubmitReady').mockResolvedValue(true);
@@ -528,8 +611,8 @@ describe('manual answer confirmation and storage', () => {
       if (message.type === 'pointask:stage-round-answer') {
         activeRoundIdWhenStaging = current.pendingThread.roundId;
         current = { ...current, localThread: { ...current.localThread,
-          rounds: current.localThread.rounds?.map((round) => round.id === firstRoundId ? { ...round, persistenceStatus: 'staged' as const,
-            stagedAnswer: [{ type: 'text' as const, content: '第一轮暂存回答' }], answerSource: {
+          rounds: current.localThread.rounds?.map((round) => round.id === currentRoundId ? { ...round, persistenceStatus: 'staged' as const,
+            stagedAnswer: [{ type: 'text' as const, content: '第四轮暂存回答' }], answerSource: {
               conversationUrl: window.location.href, conversationKey: window.location.href, messageFingerprint: fingerprint,
             } } : round) } };
       }
@@ -549,19 +632,21 @@ describe('manual answer confirmation and storage', () => {
     await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
     const internal = manager as unknown as { continueWorkspaceThread(id: string, question: string): Promise<{ ok: boolean }> };
     let continued = { ok: false };
-    await act(async () => { continued = await internal.continueWorkspaceThread('workspace-continue-only', '第二轮问题'); });
+    await act(async () => { continued = await internal.continueWorkspaceThread('workspace-continue-only', '第五轮问题'); });
     expect(continued.ok).toBe(true);
     expect(sent.findIndex((message) => message.type === 'pointask:stage-round-answer'))
       .toBeLessThan(sent.findIndex((message) => message.type === 'pointask:create-pending-thread'));
-    expect(activeRoundIdWhenStaging).toBe(firstRoundId);
+    expect(activeRoundIdWhenStaging).toBe(currentRoundId);
     const create = sent.find((message) => message.type === 'pointask:create-pending-thread')!;
     const nextPending = create.pendingThread as PendingThread;
     const nextThread = create.localThread as PendingAssociation['localThread'];
     expect(nextPending.threadId).toBe(base.localThread.id);
     expect(nextPending.id).not.toBe(base.pendingThread.id);
     expect(nextPending.roundId).toBeTruthy();
-    expect(nextThread.messages.map((message) => message.role)).toEqual(['user', 'user']);
-    expect(nextThread.rounds).toHaveLength(2);
+    expect(nextThread.messages).toHaveLength(5);
+    expect(nextThread.rounds).toHaveLength(5);
+    expect(nextThread.rounds?.slice(0, 4).map((round) => round.id)).toEqual(roundIds);
+    expect(nextThread.rounds?.find((round) => round.id === currentRoundId)?.persistenceStatus).toBe('staged');
     expect(sent.some((message) => message.type === 'pointask:attach-answer' || message.type === 'pointask:attach-rounds')).toBe(false);
     act(() => manager.stop());
   });
@@ -653,7 +738,7 @@ describe('manual answer confirmation and storage', () => {
     const internal = manager as unknown as { ensureRoundStaged(threadId: string, roundId: string): Promise<{ ok: boolean; code: string }> };
     let result = { ok: true, code: '' };
     await act(async () => { result = await internal.ensureRoundStaged(current.localThread.id, roundId); });
-    expect(result).toMatchObject({ ok: false, code: 'persist_failed' });
+    expect(result).toMatchObject({ ok: false, code: 'storage_failed' });
     expect(sent.filter((message) => message.type === 'pointask:stage-round-answer')).toHaveLength(2);
     expect(sent.some((message) => message.type === 'pointask:stage-round-answer' && message.captureFailed === true)).toBe(false);
     expect((manager as unknown as { records: Map<string, PendingAssociation> }).records.get(base.pendingThread.id)?.localThread.rounds?.[0])
@@ -723,6 +808,40 @@ describe('manual answer confirmation and storage', () => {
     expect(result).toMatchObject({ ok: true, code: 'already_staged' });
     expect(extract).not.toHaveBeenCalled();
     expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'pointask:stage-round-answer' }));
+    act(() => manager.stop());
+  });
+
+  it('retries a transient DOM extraction failure and stages the same explicit round', async () => {
+    document.body.innerHTML = '<article id="stable-answer"></article>';
+    const adapter = new ChatGptAdapter(); const answer = document.getElementById('stable-answer')!;
+    const base = association('workspace-stage-dom-retry').record; const roundId = base.localThread.messages[0]!.id;
+    let current: PendingAssociation = { ...base, targetConversationUrl: window.location.href,
+      pendingThread: { ...base.pendingThread, threadId: base.localThread.id, roundId, answerMode: 'workspace', promptHash: 'retry-hash',
+        status: 'answer_ready', targetConversationUrl: window.location.href },
+      localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready', targetConversationUrl: window.location.href,
+        rounds: [{ id: roundId, pendingId: base.pendingThread.id, promptHash: 'retry-hash', assistantFingerprintsBefore: [],
+          status: 'answer_ready', persistenceStatus: 'not_captured', createdAt: base.createdAt, updatedAt: base.updatedAt }] } };
+    vi.spyOn(adapter, 'findCandidateAnswer').mockReturnValue({ element: answer, fingerprint: 'stable-fingerprint', streaming: false });
+    const extract = vi.spyOn(adapter, 'getMessageRichContent')
+      .mockReturnValueOnce({ plainText: '', blocks: [] })
+      .mockReturnValue({ plainText: '恢复后的回答', blocks: [{ type: 'text', content: '恢复后的回答' }] });
+    const sendMessage = vi.fn().mockImplementation((message: { type: string }) => {
+      if (message.type === 'pointask:stage-round-answer') current = { ...current, localThread: { ...current.localThread,
+        rounds: current.localThread.rounds?.map((round) => ({ ...round, persistenceStatus: 'staged' as const,
+          stagedAnswer: [{ type: 'text' as const, content: '恢复后的回答' }], answerSource: {
+            conversationUrl: window.location.href, conversationKey: window.location.href, messageFingerprint: 'stable-fingerprint',
+          } })) } };
+      return Promise.resolve({ ok: true, data: current });
+    });
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }),
+      new ClipboardManager(undefined, () => false), adapter);
+    await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
+    const internal = manager as unknown as { ensureRoundStaged(threadId: string, id: string): Promise<{ ok: boolean; code: string }> };
+    let result = { ok: false, code: '' };
+    await act(async () => { result = await internal.ensureRoundStaged(current.localThread.id, roundId); });
+    expect(result).toMatchObject({ ok: true, code: 'staged' });
+    expect(extract).toHaveBeenCalledTimes(2);
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'pointask:stage-round-answer', roundId }));
     act(() => manager.stop());
   });
 

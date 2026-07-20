@@ -15,6 +15,8 @@ import { MemoryStorageDriver } from '../src/storage/storage-driver';
 import { WorkspaceStore } from '../src/storage/workspace-store';
 import type { PointAskWorkspace } from '../src/shared/local-thread';
 import { deriveWorkspaceControlVisibility, isActiveWorkspaceThread } from '../src/components/workspace-control-visibility';
+import { buildWorkspaceThreadList, selectWorkspaceThread } from '../src/components/workspace-thread-list';
+import { derivePointAskPageRole } from '../src/content/page-role';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -60,12 +62,33 @@ function runtimeFor(records: PendingAssociation[]) {
 }
 
 describe('Workspace control state', () => {
+  it('derives strict page roles without treating a saved new-chat root as every conversation', () => {
+    const value = workspaceRecord();
+    expect(derivePointAskPageRole('https://chatgpt.com/c/local-fixture', [workspace()], [value])).toBe('workspace_target');
+    expect(derivePointAskPageRole('https://chatgpt.com/c/source', [workspace()], [value])).toBe('source_page');
+    expect(derivePointAskPageRole('https://chatgpt.com/c/source', [{ ...workspace(), targetConversationUrl: 'https://chatgpt.com/' }], [
+      { ...value, targetConversationUrl: 'https://chatgpt.com/', localThread: { ...value.localThread, targetConversationUrl: 'https://chatgpt.com/' } },
+    ])).toBe('source_page');
+    expect(derivePointAskPageRole('https://chatgpt.com/c/unrelated', [workspace()], [])).toBe('unrelated');
+  });
   it('derives active and display state from persisted round lifecycle instead of activeThreadId', () => {
     expect(isActiveWorkspaceThread(workspaceRecord())).toBe(true);
     expect(isActiveWorkspaceThread(workspaceRecord('done', 'PA-004', 'answer_attached'))).toBe(false);
     expect(deriveWorkspaceControlVisibility(true, 0, false)).toBe('collapsed_idle');
     expect(deriveWorkspaceControlVisibility(true, 1, false)).toBe('collapsed_active');
     expect(deriveWorkspaceControlVisibility(false, 1, true)).toBe('hidden');
+  });
+  it('discards an older UI snapshot instead of replacing a newer thread revision', () => {
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage: vi.fn() }), new ClipboardManager(undefined, () => false));
+    const base = workspaceRecord('revision-thread', 'PA-011', 'answer_ready');
+    const newer = { ...base, revision: 8, pendingThread: { ...base.pendingThread, revision: 8 },
+      localThread: { ...base.localThread, revision: 8, status: 'answer_ready' as const } };
+    const older = { ...newer, revision: 7, pendingThread: { ...newer.pendingThread, revision: 7, status: 'failed' as const },
+      localThread: { ...newer.localThread, revision: 7, status: 'failed' as const } };
+    act(() => { manager.applyRecord(newer); manager.applyRecord(older); });
+    const records = manager as unknown as { records: Map<string, PendingAssociation> };
+    expect([...records.records.values()][0]).toMatchObject({ revision: 8, localThread: { status: 'answer_ready' } });
+    act(() => manager.stop());
   });
   it('maps each state to at most one primary action and does not duplicate sending text', () => {
     const states = [
@@ -113,6 +136,30 @@ describe('Workspace control state', () => {
     expect(next.id).not.toBe(first.id); expect(next.threadId).toBe(first.id); expect(next.roundId).toBe('round-2');
     expect(manager.get(first.id)?.id).toBe(next.id);
   });
+
+  it('lists every Workspace thread by status group and keeps skipped history inactive', () => {
+    const needs = workspaceRecord('needs', 'PA-005', 'answer_ready');
+    const progress = workspaceRecord('progress', 'PA-006', 'waiting_for_answer');
+    const skippedBase = workspaceRecord('skipped', 'PA-007', 'answer_attached');
+    const skipped = { ...skippedBase, localThread: { ...skippedBase.localThread, rounds: [{ id: 'round-skipped', questionMessageId: 'q1',
+      pendingId: skippedBase.pendingThread.id, promptHash: 'hash', status: 'answer_ready' as const, persistenceStatus: 'staged' as const,
+      assistantFingerprintsBefore: [],
+      attachmentStatus: 'skipped_retained' as const, stagedAnswer: [{ type: 'text' as const, content: 'answer' }],
+      createdAt: timestamp, updatedAt: timestamp }] } };
+    const items = buildWorkspaceThreadList([skipped, progress, needs], (item) => item.localThread.id === 'needs' ? { error: 'attach failed' } : {});
+    expect(items.map((item) => item.threadId)).toEqual(['needs', 'progress', 'skipped']);
+    expect(items.map((item) => item.group)).toEqual(['needs_action', 'in_progress', 'other']);
+    expect(items.at(-1)?.statusLabel).toBe('有跳过内容');
+    expect(isActiveWorkspaceThread(skipped)).toBe(false);
+  });
+
+  it('selects the newest active thread initially but never steals a valid manual selection', () => {
+    const older = workspaceRecord('older', 'PA-004');
+    const newerBase = workspaceRecord('newer', 'PA-005');
+    const newer = { ...newerBase, localThread: { ...newerBase.localThread, updatedAt: '2026-07-20T01:00:00.000Z' } };
+    expect(selectWorkspaceThread([older, newer], 'missing')?.localThread.id).toBe('newer');
+    expect(selectWorkspaceThread([older, newer], 'older')?.localThread.id).toBe('older');
+  });
 });
 
 describe('Workspace control visibility recovery', () => {
@@ -132,7 +179,7 @@ describe('Workspace control visibility recovery', () => {
     const reopened = new PendingBannerManager(new WebConversationBridge(runtime), new ClipboardManager(undefined, () => false), undefined, undefined, store);
     await act(async () => reopened.start()); host = document.querySelector('pointask-pending-thread-banner')!;
     expect(host.shadowRoot?.querySelector('.pointask-workspace-control')?.classList.contains('pointask-collapsed')).toBe(true);
-    expect((await store.get('workspace-1'))?.controlCardState).toMatchObject({ collapsed: true, activeThreadId: 'thread-1' });
+    expect((await store.get('workspace-1'))?.controlCardState).toMatchObject({ collapsed: true, selectedThreadId: 'thread-1' });
     await act(() => reopened.stop());
   });
 
@@ -140,17 +187,17 @@ describe('Workspace control visibility recovery', () => {
     const driver = new MemoryStorageDriver(); const store = new WorkspaceStore(driver); await store.upsert(workspace());
     const idle = new PendingBannerManager(new WebConversationBridge(runtimeFor([])), new ClipboardManager(undefined, () => false), undefined, undefined, store);
     await act(async () => idle.start());
-    let host = document.querySelector<HTMLElement>('pointask-pending-thread-banner')!;
+    const host = document.querySelector<HTMLElement>('pointask-pending-thread-banner')!;
     expect(host.style.display).toBe('block'); expect(host.shadowRoot?.textContent).toContain('暂无活跃追问');
     expect(host.shadowRoot?.querySelector('.pointask-workspace-control')?.classList.contains('pointask-collapsed')).toBe(true);
     await act(() => idle.stop());
 
     const hidden = new PendingBannerManager(new WebConversationBridge(runtimeFor([])), new ClipboardManager(undefined, () => false));
-    await act(async () => hidden.start()); host = document.querySelector<HTMLElement>('pointask-pending-thread-banner')!;
-    expect(host.style.display).toBe('none'); await act(() => hidden.stop());
+    await act(async () => hidden.start());
+    expect(document.querySelector('pointask-pending-thread-banner')).toBeNull(); await act(() => hidden.stop());
   });
 
-  it('revalidates an invalid hint, restores a unique active thread, and does not guess among multiple threads', async () => {
+  it('revalidates an invalid hint and selects the most recently updated active thread', async () => {
     const driver = new MemoryStorageDriver(); const store = new WorkspaceStore(driver); await store.upsert({ ...workspace(), controlCardState: {
       collapsed: true, activeThreadId: 'missing-thread', hasAutoExpanded: true, updatedAt: timestamp,
     } });
@@ -158,16 +205,15 @@ describe('Workspace control visibility recovery', () => {
     const unique = new PendingBannerManager(new WebConversationBridge(runtimeFor([only])), new ClipboardManager(undefined, () => false), undefined, undefined, store);
     await act(async () => unique.start());
     expect(document.querySelector('pointask-pending-thread-banner')?.shadowRoot?.textContent).toContain('PA-004');
-    expect((await store.get('workspace-1'))?.controlCardState?.activeThreadId).toBe('thread-2');
+    expect((await store.get('workspace-1'))?.controlCardState?.selectedThreadId).toBe('thread-2');
     await act(() => unique.stop());
 
     await store.updateControlCardState('workspace-1', { collapsed: true, activeThreadId: 'missing-again', hasAutoExpanded: true, updatedAt: timestamp });
     const values = [workspaceRecord('thread-2', 'PA-004'), workspaceRecord('thread-3', 'PA-005')];
     const multiple = new PendingBannerManager(new WebConversationBridge(runtimeFor(values)), new ClipboardManager(undefined, () => false), undefined, undefined, store);
     await act(async () => multiple.start()); const shadow = document.querySelector('pointask-pending-thread-banner')?.shadowRoot;
-    expect(shadow?.textContent).toContain('2 个待处理追问，请选择线程');
-    expect((shadow?.querySelector('select') as HTMLSelectElement).value).toBe('');
-    expect((await store.get('workspace-1'))?.controlCardState?.activeThreadId).toBeUndefined();
+    expect(shadow?.textContent).toContain('PA-004');
+    expect((await store.get('workspace-1'))?.controlCardState?.selectedThreadId).toBe('thread-2');
     await act(() => multiple.stop());
   });
 
@@ -183,6 +229,44 @@ describe('Workspace control visibility recovery', () => {
     expect(shadow?.textContent).toContain('暂无活跃追问');
     expect(shadow?.querySelector('.pointask-workspace-control')?.classList.contains('pointask-collapsed')).toBe(true);
     await act(() => manager.stop());
+  });
+
+  it('preserves a manual selection across other thread updates and falls back after deletion', async () => {
+    const driver = new MemoryStorageDriver(); const store = new WorkspaceStore(driver); await store.upsert({ ...workspace(), controlCardState: {
+      collapsed: false, selectedThreadId: 'thread-1', hasAutoExpanded: true, updatedAt: timestamp,
+    } });
+    const first = workspaceRecord('thread-1', 'PA-003'); const second = workspaceRecord('thread-2', 'PA-004');
+    const runtime = runtimeFor([first, second]); const manager = new PendingBannerManager(new WebConversationBridge(runtime),
+      new ClipboardManager(undefined, () => false), undefined, undefined, store);
+    await act(async () => manager.start()); let shadow = document.querySelector('pointask-pending-thread-banner')!.shadowRoot!;
+    expect(shadow.querySelector('.pointask-thread-switcher-trigger')?.textContent).toContain('PA-003');
+    await act(() => manager.applyRecord({ ...second, localThread: { ...second.localThread, updatedAt: '2026-07-20T03:00:00.000Z' } }));
+    expect(shadow.querySelector('.pointask-thread-switcher-trigger')?.textContent).toContain('PA-003');
+
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await act(() => (shadow.querySelector('.pointask-thread-switcher-trigger') as HTMLButtonElement).click());
+    const currentItem = [...shadow.querySelectorAll('.pointask-thread-switcher-item')]
+      .find((item) => item.textContent?.includes('PA-003'))!;
+    await act(async () => { [...currentItem.querySelectorAll('button')].find((button) => button.textContent === '删除线程')!.click(); await Promise.resolve(); });
+    shadow = document.querySelector('pointask-pending-thread-banner')!.shadowRoot!;
+    expect(runtime.sendMessage).toHaveBeenCalledWith({ type: 'pointask:delete-thread-data', threadId: 'thread-1' });
+    expect(shadow.querySelector('.pointask-thread-switcher-trigger')?.textContent).toContain('PA-004');
+    expect((await store.get('workspace-1'))?.controlCardState?.selectedThreadId).toBe('thread-2');
+    confirm.mockRestore(); await act(() => manager.stop());
+  });
+
+  it('unmounts the Workspace Shadow host after SPA navigation back to the source conversation', async () => {
+    const driver = new MemoryStorageDriver(); const store = new WorkspaceStore(driver); await store.upsert(workspace());
+    const active = workspaceRecord(); const runtime = runtimeFor([active]);
+    const manager = new PendingBannerManager(new WebConversationBridge(runtime), new ClipboardManager(undefined, () => false),
+      undefined, undefined, store);
+    await act(async () => manager.start());
+    expect(document.querySelector('pointask-pending-thread-banner')).not.toBeNull();
+    window.history.pushState({}, '', '/c/source');
+    await act(async () => { window.dispatchEvent(new PopStateEvent('popstate')); await Promise.resolve(); await Promise.resolve(); });
+    expect(document.querySelector('pointask-pending-thread-banner')).toBeNull();
+    expect(runtime.sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'pointask:associate-current-page' }));
+    await act(() => manager.stop()); window.history.pushState({}, '', '/c/local-fixture');
   });
 });
 
@@ -288,9 +372,35 @@ describe('Workspace control card', () => {
     await act(() => root.render(<WorkspaceControlCard record={first} records={[first, second]} rounds={[{ id: 'q1', index: 1, question: '问题', attached: false, latest: true, reliable: false }]} state={state} expanded busy={false}
       onToggleExpanded={vi.fn()} onSwitch={onSwitch} onPrimary={vi.fn()} onReturn={vi.fn()} onContinue={vi.fn().mockResolvedValue(true)}
       onAttachRounds={vi.fn().mockResolvedValue(true)} onClearSelection={vi.fn()} onAttachOnly={vi.fn()} onUnlink={vi.fn()} onCopyPrompt={vi.fn()} />));
-    const select = container.querySelector('select')!;
-    await act(() => { select.value = 'pending-2'; select.dispatchEvent(new Event('change', { bubbles: true })); });
-    expect(onSwitch).toHaveBeenCalledWith('pending-2'); await act(() => root.unmount());
+    await act(() => (container.querySelector('.pointask-thread-switcher-trigger') as HTMLButtonElement).click());
+    const secondButton = [...container.querySelectorAll<HTMLButtonElement>('.pointask-thread-switcher-select')]
+      .find((button) => button.textContent?.includes('PA-004'))!;
+    await act(() => secondButton.click());
+    expect(onSwitch).toHaveBeenCalledWith('thread-2'); await act(() => root.unmount());
+  });
+
+  it('opens a grouped selector with return and confirmed delete actions for every thread', async () => {
+    const container = document.createElement('div'); const root = createRoot(container);
+    const first = record('failed');
+    const secondBase = workspaceRecord('thread-history', 'PA-008', 'answer_attached');
+    const items = buildWorkspaceThreadList([first, secondBase]);
+    const onReturnThread = vi.fn(); const onDeleteThread = vi.fn();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await act(() => root.render(<WorkspaceControlCard record={first} threads={items} rounds={[]} expanded={false}
+      state={deriveWorkspaceControlState({ record: first, reliable: false, sending: false, selectionLength: 0, returnFailed: false })}
+      busy={false} onToggleExpanded={vi.fn()} onSwitch={vi.fn()} onReturnThread={onReturnThread} onDeleteThread={onDeleteThread}
+      onPrimary={vi.fn()} onReturn={vi.fn()} onContinue={vi.fn().mockResolvedValue(true)} onAttachRounds={vi.fn().mockResolvedValue(true)}
+      onClearSelection={vi.fn()} onAttachOnly={vi.fn()} onUnlink={vi.fn()} onCopyPrompt={vi.fn()} />));
+    await act(() => (container.querySelector('.pointask-thread-switcher-trigger') as HTMLButtonElement).click());
+    expect(container.textContent).toContain('需要处理'); expect(container.textContent).toContain('其他线程');
+    expect(container.textContent).toContain('PA-003'); expect(container.textContent).toContain('PA-008');
+    const history = [...container.querySelectorAll('.pointask-thread-switcher-item')]
+      .find((item) => item.textContent?.includes('PA-008'))!;
+    await act(() => [...history.querySelectorAll('button')].find((button) => button.textContent === '返回原文')!.click());
+    expect(onReturnThread).toHaveBeenCalledWith('thread-history');
+    await act(() => [...history.querySelectorAll('button')].find((button) => button.textContent === '删除线程')!.click());
+    expect(onDeleteThread).toHaveBeenCalledWith('thread-history');
+    confirm.mockRestore(); await act(() => root.unmount());
   });
 
   it('selects all reliable rounds by default and allows excluding one round', async () => {

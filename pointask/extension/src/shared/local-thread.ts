@@ -1,5 +1,5 @@
 export type AnswerMode = 'workspace' | 'current_conversation' | 'dedicated_branch';
-export type ThreadStatus = 'draft' | 'prompt_ready' | 'waiting_for_submission' | 'waiting_for_answer' | 'generating' | 'answer_ready' | 'answer_attached' | 'failed' | 'orphaned';
+export type ThreadStatus = 'draft' | 'prompt_ready' | 'waiting_for_submission' | 'submitting' | 'submission_unknown' | 'waiting_for_answer' | 'generating' | 'answer_ready' | 'answer_attached' | 'failed' | 'orphaned';
 export type CurrentConversationScrollBehavior = 'stay_at_source' | 'follow_response';
 
 export type RichContentBlock =
@@ -65,7 +65,9 @@ export interface PointAskWorkspace {
 
 export interface WorkspaceControlCardState {
   collapsed: boolean;
-  /** The thread id is a recovery hint and must be revalidated against active threads. */
+  /** The last explicitly selected thread. It is a recovery hint and is revalidated against Workspace threads. */
+  selectedThreadId?: string;
+  /** @deprecated Migrated to selectedThreadId when older storage is read. */
   activeThreadId?: string;
   hasAutoExpanded: boolean;
   updatedAt: string;
@@ -142,7 +144,7 @@ export interface LocalThreadRound {
   promptHash: string;
   assistantFingerprintsBefore: string[];
   candidateAnswerFingerprint?: string;
-  status: 'waiting_for_submission' | 'waiting_for_answer' | 'generating' | 'answer_ready' | 'failed' | 'attached';
+  status: 'waiting_for_submission' | 'submitting' | 'submission_unknown' | 'waiting_for_answer' | 'generating' | 'answer_ready' | 'failed' | 'attached';
   persistenceStatus: RoundPersistenceStatus;
   attachmentStatus?: RoundAttachmentStatus;
   stagedAnswer?: RichContentBlock[];
@@ -153,6 +155,8 @@ export interface LocalThreadRound {
   answerSource?: AnswerSourceLocator;
   createdAt: string;
   updatedAt: string;
+  /** Monotonic lifecycle revision inherited from its owning thread write. */
+  revision?: number;
 }
 
 export interface LocalThread {
@@ -172,6 +176,8 @@ export interface LocalThread {
   status: ThreadStatus;
   createdAt: string;
   updatedAt: string;
+  /** Monotonic persisted lifecycle revision. Older async snapshots cannot replace a newer value. */
+  revision?: number;
   expanded?: boolean;
   collapsedRoundIds?: string[];
 }
