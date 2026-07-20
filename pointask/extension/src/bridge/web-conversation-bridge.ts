@@ -203,7 +203,14 @@ export class WebConversationBridge {
     }
     if (!response?.ok) {
       const internal = response?.error || '';
-      const friendly = /another source tab|cannot be updated from this tab|source tab|associated.*unavailable|cannot be associated/i.test(internal)
+      if (import.meta.env.DEV) console.debug(`[PointAsk bridge]\ntype=${message.type}\nerror=${internal || 'empty_response'}`);
+      const friendly = /quota|QUOTA_BYTES|storage.*limit/i.test(internal)
+        ? 'PointAsk 本地存储空间不足，请先在设置中清理不再需要的数据。'
+        : /message port closed|receiving end does not exist|service worker|context invalidated/i.test(internal)
+          ? 'PointAsk 后台连接刚刚中断，正在保留当前轮次供重试。'
+          : message.type === 'pointask:stage-round-answer' && /invalid pointask runtime message/i.test(internal)
+            ? '暂存请求校验失败，请刷新当前页面后重试。'
+            : /another source tab|cannot be updated from this tab|source tab|associated.*unavailable|cannot be associated/i.test(internal)
         ? '当前页面关联已失效，请重新关联后继续。'
         : internal && /[\u3400-\u9fff]/.test(internal) ? internal : '操作失败，请重试。';
       throw new Error(friendly);

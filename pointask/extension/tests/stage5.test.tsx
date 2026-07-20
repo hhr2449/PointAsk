@@ -592,14 +592,20 @@ describe('manual answer confirmation and storage', () => {
     vi.spyOn(adapter, 'findCandidateAnswer').mockImplementation((hash) => hash === 'hash-q2'
       ? { element: answer, fingerprint, streaming: false } : null);
     const extract = vi.spyOn(adapter, 'getMessageRichContent');
-    const sent: Array<{ type: string; rounds?: Array<{ roundId: string }> }> = [];
-    const sendMessage = vi.fn().mockImplementation((message: { type: string; rounds?: Array<{ roundId: string }> }) => {
+    const sent: Array<{ type: string; rounds?: Array<{ roundId: string }>; captureFailed?: boolean }> = [];
+    let stageAttempts = 0;
+    const sendMessage = vi.fn().mockImplementation((message: { type: string; rounds?: Array<{ roundId: string }>; captureFailed?: boolean }) => {
       sent.push(message);
-      if (message.type === 'pointask:stage-round-answer') current = { ...current, localThread: { ...current.localThread,
-        rounds: current.localThread.rounds?.map((round) => round.id === q2 ? { ...round, persistenceStatus: 'staged' as const,
-          stagedAnswer: [{ type: 'text' as const, content: '第二答' }], answerSource: {
-            conversationUrl: window.location.href, conversationKey: window.location.href, messageFingerprint: fingerprint,
-          } } : round) } };
+      if (message.type === 'pointask:stage-round-answer') {
+        stageAttempts++;
+        if (stageAttempts === 1) return Promise.resolve({ ok: false, error: 'The message port closed before a response was received.' });
+        current = { ...current, localThread: { ...current.localThread,
+          rounds: current.localThread.rounds?.map((round) => round.id === q2 ? { ...round, persistenceStatus: 'staged' as const,
+            stagedAnswer: [{ type: 'text' as const, content: '第二答' }], answerSource: {
+              conversationUrl: window.location.href, conversationKey: window.location.href, messageFingerprint: fingerprint,
+            } } : round) } };
+      }
+      if (message.type === 'pointask:get-page-pending-threads') return Promise.resolve({ ok: true, data: [current] });
       if (message.type === 'pointask:attach-rounds') current = { ...current, localThread: { ...current.localThread,
         rounds: current.localThread.rounds?.map((round) => message.rounds?.some((payload) => payload.roundId === round.id)
           ? { ...round, status: 'attached' as const, persistenceStatus: 'attached' as const, stagedAnswer: undefined } : round) } };
@@ -612,9 +618,46 @@ describe('manual answer confirmation and storage', () => {
     const outcome: { value: PendingAssociation | null } = { value: null };
     await act(async () => { outcome.value = await internal.attachSelectedRounds(base.pendingThread.id); });
     expect(sent.find((message) => message.type === 'pointask:stage-round-answer')).toBeTruthy();
+    expect(sent.filter((message) => message.type === 'pointask:stage-round-answer')).toHaveLength(2);
+    expect(sent.filter((message) => message.type === 'pointask:stage-round-answer').every((message) => message.captureFailed === false)).toBe(true);
     expect(sent.find((message) => message.type === 'pointask:attach-rounds')?.rounds?.map((round) => round.roundId)).toEqual([q1, q2]);
     expect(extract).toHaveBeenCalledTimes(1);
     expect(outcome.value?.localThread.rounds?.every((round) => round.persistenceStatus === 'attached')).toBe(true);
+    act(() => manager.stop());
+  });
+
+  it('keeps an extracted answer retryable when staging persistence fails and never overwrites it as capture_failed', async () => {
+    document.body.innerHTML = chatGptFixture;
+    const adapter = new ChatGptAdapter(); const answer = document.querySelector<HTMLElement>('[data-testid="conversation-turn-2"]')!;
+    const fingerprint = adapter.getMessageFingerprint(answer); const base = association('workspace-stage-persist-failure').record;
+    const roundId = 'round-persist-failure';
+    const current: PendingAssociation = { ...base, targetConversationUrl: window.location.href,
+      pendingThread: { ...base.pendingThread, threadId: base.localThread.id, roundId, answerMode: 'workspace', promptHash: 'persist-hash',
+        candidateAnswerFingerprint: fingerprint, status: 'answer_ready', targetConversationUrl: window.location.href },
+      localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready', targetConversationUrl: window.location.href,
+        messages: [{ id: 'question-persist', roundId, role: 'user', content: [{ type: 'text', content: '问题' }],
+          attachedManually: false, createdAt: base.createdAt }], rounds: [{ id: roundId, questionMessageId: 'question-persist',
+          pendingId: base.pendingThread.id, promptHash: 'persist-hash', assistantFingerprintsBefore: [],
+          candidateAnswerFingerprint: fingerprint, status: 'answer_ready', persistenceStatus: 'not_captured',
+          createdAt: base.createdAt, updatedAt: base.updatedAt }] } };
+    vi.spyOn(adapter, 'findCandidateAnswer').mockReturnValue({ element: answer, fingerprint, streaming: false });
+    const sent: Array<{ type: string; captureFailed?: boolean }> = [];
+    const sendMessage = vi.fn().mockImplementation((message: { type: string; captureFailed?: boolean }) => {
+      sent.push(message);
+      if (message.type === 'pointask:get-page-pending-threads') return Promise.resolve({ ok: true, data: [current] });
+      if (message.type === 'pointask:stage-round-answer') return Promise.resolve({ ok: false, error: 'storage temporarily unavailable' });
+      return Promise.resolve({ ok: true, data: current });
+    });
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }), new ClipboardManager(undefined, () => false), adapter);
+    await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
+    const internal = manager as unknown as { ensureRoundStaged(threadId: string, roundId: string): Promise<{ ok: boolean; code: string }> };
+    let result = { ok: true, code: '' };
+    await act(async () => { result = await internal.ensureRoundStaged(current.localThread.id, roundId); });
+    expect(result).toMatchObject({ ok: false, code: 'persist_failed' });
+    expect(sent.filter((message) => message.type === 'pointask:stage-round-answer')).toHaveLength(2);
+    expect(sent.some((message) => message.type === 'pointask:stage-round-answer' && message.captureFailed === true)).toBe(false);
+    expect((manager as unknown as { records: Map<string, PendingAssociation> }).records.get(base.pendingThread.id)?.localThread.rounds?.[0])
+      .toMatchObject({ persistenceStatus: 'not_captured', status: 'answer_ready' });
     act(() => manager.stop());
   });
 

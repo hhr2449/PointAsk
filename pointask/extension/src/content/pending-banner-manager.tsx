@@ -44,7 +44,7 @@ type WorkspaceAttachPhase = 'validate' | 'extract' | 'persist' | 'navigate';
 interface RejectedWorkspaceRound { roundId: string; reason: string; }
 type WorkspaceStagingTrigger = 'continue' | 'attach_all' | 'attach_selected';
 type EnsureRoundStagedCode = 'staged' | 'already_staged' | 'already_attached' | 'answer_still_streaming' |
-  'answer_not_complete' | 'answer_not_loaded' | 'answer_ambiguous' | 'capture_failed';
+  'answer_not_complete' | 'answer_not_loaded' | 'answer_ambiguous' | 'capture_failed' | 'persist_failed';
 interface EnsureRoundStagedResult { ok: boolean; code: EnsureRoundStagedCode; record?: PendingAssociation; error?: string; }
 
 function logWorkspaceAttach(details: { threadId: string; selectedRoundIds: string[]; validRoundIds: string[];
@@ -572,18 +572,52 @@ export class PendingBannerManager {
     if (!rich?.blocks.length || !isRichContent(rich.blocks)) return fail('capture_failed', '回答内容为空或格式无效', 'extract');
     const answerSource = { conversationUrl: window.location.href,
       conversationKey: this.adapter?.getConversationKey() ?? window.location.href, messageFingerprint: round.candidate.fingerprint };
-    try {
-      const storedRound = threadRounds(record.localThread).find((item) => item.id === round.id);
-      const updated = await this.bridge.stageRoundAnswer(record.pendingThread.id, round.id, storedRound?.promptHash ?? '', {
+    const persistStage = (association: PendingAssociation) => {
+      const storedRound = threadRounds(association.localThread).find((item) => item.id === round.id);
+      if (!storedRound?.promptHash) throw new Error('轮次提示词标识缺失，请刷新页面后重试');
+      return this.bridge.stageRoundAnswer(association.pendingThread.id, round.id, storedRound.promptHash, {
         captureFailed: false, richContent: rich.blocks, answerSource, targetUrl: window.location.href,
       });
+    };
+    try {
+      const storedRound = threadRounds(record.localThread).find((item) => item.id === round.id);
+      let updated: PendingAssociation;
+      try {
+        updated = await persistStage(record);
+      } catch (firstError) {
+        // A service-worker restart or a closed response port may happen after
+        // the atomic write completed. Re-read the page snapshot before retrying
+        // so a successful stage is never overwritten with capture_failed.
+        let refreshed: PendingAssociation | undefined;
+        try {
+          const pageRecords = await this.bridge.getPagePendingThreads(window.location.href);
+          refreshed = pageRecords.find((item) => item.pendingThread.id === record.pendingThread.id &&
+            item.localThread.id === threadId);
+        } catch { /* Preserve the first staging error below. */ }
+        const refreshedRound = refreshed && threadRounds(refreshed.localThread).find((item) => item.id === round.id);
+        if (refreshed && refreshedRound?.persistenceStatus === 'staged' && refreshedRound.stagedAnswer?.length) {
+          updated = refreshed;
+        } else if (refreshed && refreshedRound?.status === 'answer_ready' && refreshedRound.promptHash === storedRound?.promptHash) {
+          updated = await persistStage(refreshed);
+        } else {
+          throw firstError;
+        }
+      }
       this.records.set(record.pendingThread.id, updated); this.errors.delete(record.pendingThread.id); this.render();
       log('persist', 'staged');
       logWorkspaceRound({ threadId, roundId, activeRoundId, pendingId: storedRound?.pendingId, trigger,
         beforeStatus, afterStatus: 'staged', phase: 'stage' });
       return { ok: true, code: 'staged', record: updated };
     } catch (error) {
-      return fail('capture_failed', error instanceof Error ? error.message : '本地保存失败', 'persist');
+      const message = error instanceof Error ? error.message : '本地保存失败';
+      // Extraction succeeded, so this is not capture_failed. Keeping the round
+      // answer_ready/not_captured makes the operation safely retryable.
+      log('persist', beforeStatus, message);
+      logWorkspaceRound({ threadId, roundId, activeRoundId,
+        pendingId: threadRounds(record.localThread).find((item) => item.id === round.id)?.pendingId,
+        trigger, beforeStatus, afterStatus: beforeStatus, phase: 'stage', error: message });
+      this.errors.set(record.pendingThread.id, `当前回答暂存保存失败：${message}`); this.render();
+      return { ok: false, code: 'persist_failed', error: `当前回答暂存保存失败：${message}` };
     }
   }
 
