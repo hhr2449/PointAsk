@@ -1,4 +1,4 @@
-import type { PointAskWorkspace } from '../shared/local-thread';
+import type { PointAskWorkspace, WorkspaceControlCardState } from '../shared/local-thread';
 import { migrateStorage } from './migration';
 import { STORAGE_KEYS, STORAGE_SCHEMA_VERSION } from './storage-schema';
 import { withStorageLock, type StorageDriver } from './storage-driver';
@@ -33,7 +33,22 @@ export class WorkspaceStore {
   }
   async upsert(workspace: PointAskWorkspace): Promise<void> {
     await withStorageLock('workspace', async () => {
-      const items = await this.list(); await this.write([...items.filter((item) => item.id !== workspace.id), workspace]);
+      const items = await this.list(); const existing = items.find((item) => item.id === workspace.id);
+      const currentControl = existing?.controlCardState;
+      const incomingControl = workspace.controlCardState;
+      const controlCardState = currentControl && (!incomingControl || Date.parse(currentControl.updatedAt) > Date.parse(incomingControl.updatedAt))
+        ? currentControl : incomingControl;
+      const merged = { ...workspace, ...(controlCardState ? { controlCardState } : {}) };
+      await this.write([...items.filter((item) => item.id !== workspace.id), merged]);
+    });
+  }
+  async updateControlCardState(id: string, state: WorkspaceControlCardState): Promise<PointAskWorkspace | null> {
+    return withStorageLock('workspace', async () => {
+      const items = await this.list(); const workspace = items.find((item) => item.id === id);
+      if (!workspace) return null;
+      const updated = { ...workspace, controlCardState: state };
+      await this.write([...items.filter((item) => item.id !== id), updated]);
+      return updated;
     });
   }
   async updateContextProgress(id: string, messages: Array<{ fingerprint: string; role: 'user' | 'assistant' }>): Promise<PointAskWorkspace | null> {

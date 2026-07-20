@@ -22,6 +22,10 @@ import { stableTextHash } from '../shared/text-utils';
 import { textBlocks } from '../shared/rich-content';
 import { roundIdForPending, threadRounds } from '../shared/thread-rounds';
 import type { SelectableRound } from '../components/round-selection-view';
+import { WorkspaceControlEntry } from '../components/workspace-control-entry';
+import { deriveWorkspaceControlVisibility, isActiveWorkspaceThread } from '../components/workspace-control-visibility';
+import type { PointAskWorkspace } from '../shared/local-thread';
+import type { WorkspaceStore } from '../storage/workspace-store';
 
 interface MountedAnswerAction {
   host: HTMLElement;
@@ -87,6 +91,7 @@ export class PendingBannerManager {
   private cleanupRuntime: (() => void) | null = null;
   private cleanupExecuteSend: (() => void) | null = null;
   private cleanupReadyProbe: (() => void) | null = null;
+  private cleanupWorkspaceStore: (() => void) | null = null;
   private urlTimer: ReturnType<typeof setInterval> | null = null;
   private currentUrl = window.location.href;
   private readonly candidates = new Map<string, CandidateAnswer>();
@@ -99,8 +104,13 @@ export class PendingBannerManager {
   private readonly returnedIds = new Set<string>();
   private partialSelectionId: string | null = null;
   private returnToThreadHandler: ((id: string) => boolean) | null = null;
-  private activeWorkspacePendingId: string | null = null;
+  private activeWorkspaceThreadId: string | null = null;
   private workspaceExpanded = true;
+  private workspacePage: PointAskWorkspace | null = null;
+  private workspacePageKnown = false;
+  private loadedWorkspacePreferenceId: string | null = null;
+  private idleExpandedByUser = false;
+  private previousActiveWorkspaceCount = 0;
   private workspaceSelection: SelectionData | null = null;
   private readonly returnFailedIds = new Set<string>();
   private readonly stagingPromises = new Map<string, Promise<EnsureRoundStagedResult>>();
@@ -110,6 +120,7 @@ export class PendingBannerManager {
     private readonly clipboard: ClipboardManager,
     private readonly adapter?: SiteAdapter,
     private readonly authorizer?: OperationAuthorizer,
+    private readonly workspaceStore?: WorkspaceStore,
   ) {
     this.host = document.createElement('pointask-pending-thread-banner');
     this.host.dataset.pointaskOwned = 'true';
@@ -132,7 +143,9 @@ export class PendingBannerManager {
     });
     const records = await this.bridge.getPagePendingThreads();
     this.records = new Map(records.map((record) => [record.pendingThread.id, record]));
+    await this.refreshWorkspacePage();
     this.render();
+    this.cleanupWorkspaceStore = this.workspaceStore?.subscribe(() => { void this.refreshWorkspacePage(true); }) ?? null;
     this.cleanupRuntime = this.bridge.onPendingUpdated((record) => {
       if (record.associationStatus === 'cancelled' || record.associationStatus === 'completed' || record.associationStatus === 'created' ||
         (record.localThread.answerMode === 'current_conversation' && record.localThread.status === 'answer_attached')) {
@@ -199,6 +212,7 @@ export class PendingBannerManager {
     this.cleanupRuntime = null;
     this.cleanupExecuteSend?.(); this.cleanupExecuteSend = null;
     this.cleanupReadyProbe?.(); this.cleanupReadyProbe = null;
+    this.cleanupWorkspaceStore?.(); this.cleanupWorkspaceStore = null;
     this.cleanupCandidateObserver?.();
     this.cleanupCandidateObserver = null;
     window.removeEventListener('popstate', this.checkUrl);
@@ -224,7 +238,46 @@ export class PendingBannerManager {
         }
       }
     }
+    void this.refreshPageAfterNavigation();
   };
+
+  private async refreshPageAfterNavigation(): Promise<void> {
+    const records = await this.bridge.getPagePendingThreads().catch(() => []);
+    this.records = new Map(records.map((record) => [record.pendingThread.id, record]));
+    this.loadedWorkspacePreferenceId = null;
+    await this.refreshWorkspacePage();
+    this.refreshCandidates();
+    this.render();
+  }
+
+  private async refreshWorkspacePage(fromStoreChange = false): Promise<void> {
+    const workspaceRecords = [...this.records.values()].filter((record) => record.localThread.answerMode === 'workspace' &&
+      Boolean((record.targetConversationUrl ?? record.pendingThread.targetConversationUrl) &&
+        isCompatibleChatGptTargetUrl(record.targetConversationUrl ?? record.pendingThread.targetConversationUrl!, window.location.href)));
+    const workspaces = await this.workspaceStore?.list().catch(() => []) ?? [];
+    const recordWorkspaceIds = new Set(workspaceRecords.flatMap((record) => record.localThread.workspaceId ? [record.localThread.workspaceId] : []));
+    const workspace = workspaces.find((item) => Boolean(item.targetConversationUrl &&
+      isCompatibleChatGptTargetUrl(item.targetConversationUrl, window.location.href))) ??
+      workspaces.find((item) => recordWorkspaceIds.has(item.id)) ?? null;
+    this.workspacePage = workspace;
+    this.workspacePageKnown = Boolean(workspace || workspaceRecords.length);
+    if (!workspace) return;
+    if (this.loadedWorkspacePreferenceId !== workspace.id || fromStoreChange) {
+      const preference = workspace.controlCardState;
+      this.workspaceExpanded = preference ? !preference.collapsed : true;
+      this.activeWorkspaceThreadId = preference?.activeThreadId ?? null;
+      this.loadedWorkspacePreferenceId = workspace.id;
+    }
+  }
+
+  private persistWorkspaceControlState(): void {
+    const workspace = this.workspacePage;
+    if (!workspace || !this.workspaceStore) return;
+    const state = { collapsed: !this.workspaceExpanded, activeThreadId: this.activeWorkspaceThreadId ?? undefined,
+      hasAutoExpanded: true, updatedAt: new Date().toISOString() };
+    this.workspacePage = { ...workspace, controlCardState: state };
+    void this.workspaceStore.updateControlCardState(workspace.id, state).catch(() => undefined);
+  }
 
   private render(): void {
     const visible = [...this.records.values()].filter((record) => !this.closedIds.has(record.pendingThread.id) &&
@@ -234,12 +287,26 @@ export class PendingBannerManager {
     const workspaceRecords = visible.filter((record) => record.localThread.answerMode === 'workspace')
       .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
     const legacyRecords = visible.filter((record) => record.localThread.answerMode !== 'workspace');
-    let active = workspaceRecords.find((record) => record.pendingThread.id === this.activeWorkspacePendingId);
-    if (!active && workspaceRecords.length === 1) active = workspaceRecords[0];
-    if (!active) active = workspaceRecords.find((record) => !['answer_attached'].includes(record.localThread.status)) ?? workspaceRecords[0];
-    if (active) this.activeWorkspacePendingId = active.pendingThread.id;
-    this.host.style.display = visible.length ? 'block' : 'none';
-    this.host.classList.toggle('pointask-has-workspace-control', Boolean(active));
+    const activeWorkspaceRecords = workspaceRecords.filter((record) => isActiveWorkspaceThread(record,
+      this.sendingIds.has(record.pendingThread.id) || this.attachingIds.has(record.pendingThread.id) ||
+      this.returnFailedIds.has(record.pendingThread.id)));
+    if (this.previousActiveWorkspaceCount > 0 && activeWorkspaceRecords.length === 0) this.idleExpandedByUser = false;
+    this.previousActiveWorkspaceCount = activeWorkspaceRecords.length;
+    let active = activeWorkspaceRecords.find((record) => record.localThread.id === this.activeWorkspaceThreadId);
+    if (!active && activeWorkspaceRecords.length === 1) {
+      active = activeWorkspaceRecords[0];
+      this.activeWorkspaceThreadId = active.localThread.id;
+      this.persistWorkspaceControlState();
+    } else if (!active && this.activeWorkspaceThreadId) {
+      this.activeWorkspaceThreadId = null;
+      this.persistWorkspaceControlState();
+    }
+    const workspacePage = this.workspacePageKnown || workspaceRecords.length > 0;
+    if (workspacePage && activeWorkspaceRecords.length > 0 && !this.workspacePage?.controlCardState) this.persistWorkspaceControlState();
+    const effectiveExpanded = this.workspaceExpanded && (activeWorkspaceRecords.length > 0 || this.idleExpandedByUser);
+    const visibility = deriveWorkspaceControlVisibility(workspacePage, activeWorkspaceRecords.length, effectiveExpanded);
+    this.host.style.display = visibility === 'hidden' && legacyRecords.length === 0 ? 'none' : 'block';
+    this.host.classList.toggle('pointask-has-workspace-control', visibility !== 'hidden');
     const activeCandidate = active ? this.candidates.get(active.pendingThread.id) : undefined;
     const activeReliable = Boolean(active && activeCandidate && this.isReliableCandidate(active.pendingThread.id, activeCandidate));
     const activeRounds = active ? this.resolveWorkspaceRounds(active) : [];
@@ -250,7 +317,7 @@ export class PendingBannerManager {
       ? this.workspaceSelection : null;
     this.root.render(
       <>
-      {active && <WorkspaceControlCard record={active} records={workspaceRecords.slice(0, 6)} rounds={activeRounds} expanded={this.workspaceExpanded}
+      {active && <WorkspaceControlCard record={active} records={activeWorkspaceRecords.slice(0, 6)} rounds={activeRounds} expanded={effectiveExpanded}
         state={deriveWorkspaceControlState({ record: active, candidate: activeCandidate, reliable: activeReliable,
           sending: this.sendingIds.has(active.pendingThread.id), selectionLength: activeSelection?.selectedText.length ?? 0,
           returnFailed: this.returnFailedIds.has(active.pendingThread.id), attachableRoundCount: attachableRounds.length,
@@ -259,8 +326,11 @@ export class PendingBannerManager {
             ['staged', 'attached', 'capture_failed'].includes(activeRounds.at(-1)!.persistenceStatus))) })}
         busy={this.sendingIds.has(active.pendingThread.id) || this.attachingIds.has(active.pendingThread.id)}
         error={this.errors.get(active.pendingThread.id)} selectionSummary={activeSelection ? `${activeSelection.selectedText.length} 个字符：${activeSelection.selectedText.slice(0, 36)}${activeSelection.selectedText.length > 36 ? '…' : ''}` : undefined}
-        onToggleExpanded={() => { this.workspaceExpanded = !this.workspaceExpanded; this.render(); }}
-        onSwitch={(id) => { this.activeWorkspacePendingId = id; this.workspaceSelection = null; this.render(); }}
+        otherActiveCount={Math.max(0, activeWorkspaceRecords.length - 1)}
+        onToggleExpanded={() => { this.workspaceExpanded = !effectiveExpanded; this.persistWorkspaceControlState(); this.render(); }}
+        onSwitch={(id) => { const selected = activeWorkspaceRecords.find((item) => item.pendingThread.id === id);
+          this.activeWorkspaceThreadId = selected?.localThread.id ?? null; this.workspaceSelection = null;
+          this.persistWorkspaceControlState(); this.render(); }}
         onPrimary={() => void this.runWorkspacePrimary(active!.pendingThread.id)} onReturn={() => void this.returnToSourceThread(active!.pendingThread.id)}
         onContinue={(question, skipCapture) => this.continueWorkspaceThread(active!.pendingThread.id, question, skipCapture)}
         onAttachRounds={(ids) => this.attachWorkspaceRounds(active!.pendingThread.id, ids)}
@@ -269,6 +339,13 @@ export class PendingBannerManager {
         onUnlink={() => void this.unlink(active!.pendingThread.id)} onCopyPrompt={() => void this.copy(active!.pendingThread.id)}
         debugInfo={import.meta.env.DEV ? JSON.stringify({ pendingId: active.pendingThread.id, threadId: active.localThread.id,
           roundId: active.pendingThread.roundId, status: active.localThread.status }, null, 2) : undefined} />}
+      {!active && visibility !== 'hidden' && <WorkspaceControlEntry records={activeWorkspaceRecords.slice(0, 6)}
+        expanded={effectiveExpanded} idle={activeWorkspaceRecords.length === 0}
+        onToggle={() => { this.workspaceExpanded = !effectiveExpanded; this.idleExpandedByUser = activeWorkspaceRecords.length === 0 && !effectiveExpanded;
+          this.persistWorkspaceControlState(); this.render(); }}
+        onSwitch={(id) => { const selected = activeWorkspaceRecords.find((item) => item.pendingThread.id === id);
+          if (!selected) return; this.activeWorkspaceThreadId = selected.localThread.id; this.workspaceExpanded = true;
+          this.persistWorkspaceControlState(); this.render(); }} />}
       {legacyRecords.length > 0 && <PendingThreadBanner
         records={legacyRecords}
         copiedIds={this.copiedIds}
@@ -494,7 +571,8 @@ export class PendingBannerManager {
     this.sendingIds.add(pendingId); this.errors.delete(id); this.render();
     try {
       const created = await this.bridge.savePendingThread(pending, localThread);
-      this.records.delete(id); this.records.set(pendingId, created); this.activeWorkspacePendingId = pendingId;
+      this.records.delete(id); this.records.set(pendingId, created); this.activeWorkspaceThreadId = created.localThread.id;
+      this.persistWorkspaceControlState();
       this.sendingIds.delete(pendingId); this.render();
       return { ok: await this.fill(pendingId) };
     } catch (error) {

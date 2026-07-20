@@ -118,11 +118,14 @@ export function migrateStorage(raw: Record<string, unknown>): PointAskStorageSch
       typeof item.createdAt === 'string' && typeof item.updatedAt === 'string' &&
       (item.targetConversationUrl === undefined || typeof item.targetConversationUrl === 'string' && isChatGptUrl(item.targetConversationUrl)));
   }).map((workspace) => {
+    const workspaceWithoutControlState = { ...workspace };
+    delete workspaceWithoutControlState.controlCardState;
     const rawState = record((workspace as unknown as Record<string, unknown>).contextState);
+    const rawControlState = record((workspace as unknown as Record<string, unknown>).controlCardState);
     const status = ['fresh', 'outdated', 'unknown', 'diverged'].includes(String(rawState?.status))
       ? rawState?.status as PointAskWorkspace['contextState']['status'] : 'unknown';
     return {
-      ...workspace,
+      ...workspaceWithoutControlState,
       contextState: {
         contextVersion: typeof rawState?.contextVersion === 'number' && rawState.contextVersion >= 1 ? rawState.contextVersion : 1,
         ...(typeof rawState?.lastSyncedMessageFingerprint === 'string' ? { lastSyncedMessageFingerprint: rawState.lastSyncedMessageFingerprint } : {}),
@@ -131,6 +134,15 @@ export function migrateStorage(raw: Record<string, unknown>): PointAskStorageSch
         unsyncedTurnCount: typeof rawState?.unsyncedTurnCount === 'number' ? rawState.unsyncedTurnCount : 0,
         status,
       },
+      ...(rawControlState && typeof rawControlState.collapsed === 'boolean' &&
+        typeof rawControlState.hasAutoExpanded === 'boolean' && typeof rawControlState.updatedAt === 'string'
+        ? { controlCardState: {
+            collapsed: rawControlState.collapsed,
+            hasAutoExpanded: rawControlState.hasAutoExpanded,
+            updatedAt: rawControlState.updatedAt,
+            ...(typeof rawControlState.activeThreadId === 'string' ? { activeThreadId: rawControlState.activeThreadId } : {}),
+          } }
+        : {}),
       ...((workspace as unknown as Record<string, unknown>).pendingContextUpdate ? { pendingContextUpdate: (workspace as unknown as Record<string, unknown>).pendingContextUpdate as PointAskWorkspace['pendingContextUpdate'] } : {}),
     };
   });

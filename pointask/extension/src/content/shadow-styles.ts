@@ -133,12 +133,16 @@ export const workspaceControlStyles = `${sharedShadowStyles}
   .pointask-workspace-control.pointask-collapsed { width: 240px; margin-left: auto; overflow: visible; }
   .pointask-control-header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 48px; padding: 0 16px; background: var(--pa-bg); }
   .pointask-control-brand { display: flex; align-items: center; min-width: 0; gap: 8px; }
-  .pointask-control-brand strong::after { content: "·"; margin-left: 8px; color: var(--pa-muted); }
+  .pointask-control-brand.pointask-has-thread strong::after { content: "·"; margin-left: 8px; color: var(--pa-muted); }
   .pointask-control-brand select { max-width: 112px; border: 1px solid var(--pa-border); border-radius: 7px; padding: 4px 6px; color: inherit; background: var(--pa-bg); font: inherit; }
   .pointask-control-toggle { flex: none; padding: 6px; border-radius: 7px; color: var(--pa-muted); }
   .pointask-control-toggle:hover { background: var(--pa-hover); }
   .pointask-control-space-title { padding: 0 16px 12px; border-bottom: 1px solid var(--pa-border); color: var(--pa-muted); font-weight: 600; }
   .pointask-collapsed-status { padding: 0 16px 12px; color: var(--pa-muted); }
+  .pointask-collapsed-status small { display: block; margin-top: 3px; }
+  .pointask-collapsed-error { color: var(--pa-danger); }
+  .pointask-control-other-count { padding: 9px 16px; border-bottom: 1px solid var(--pa-border); color: var(--pa-muted); }
+  .pointask-idle-view { color: var(--pa-muted); }
   .pointask-control-body { position: relative; }
   .pointask-control-view { display: grid; gap: var(--pointask-control-gap); padding: 16px; }
   .pointask-control-view section, .pointask-control-view h2, .pointask-control-view p { margin: 0; }

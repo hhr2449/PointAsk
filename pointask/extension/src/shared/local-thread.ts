@@ -57,7 +57,17 @@ export interface PointAskWorkspace {
   approximateContentLength: number;
   contextState: WorkspaceContextState;
   pendingContextUpdate?: PendingWorkspaceContextUpdate;
+  /** Local-only presentation preference for the Workspace control card. */
+  controlCardState?: WorkspaceControlCardState;
   createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkspaceControlCardState {
+  collapsed: boolean;
+  /** The thread id is a recovery hint and must be revalidated against active threads. */
+  activeThreadId?: string;
+  hasAutoExpanded: boolean;
   updatedAt: string;
 }
 

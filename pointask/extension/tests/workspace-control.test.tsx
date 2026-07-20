@@ -10,6 +10,10 @@ import { PendingThreadManager } from '../src/bridge/pending-thread-manager';
 import { PendingBannerManager } from '../src/content/pending-banner-manager';
 import { WebConversationBridge } from '../src/bridge/web-conversation-bridge';
 import { ClipboardManager } from '../src/bridge/clipboard-manager';
+import { MemoryStorageDriver } from '../src/storage/storage-driver';
+import { WorkspaceStore } from '../src/storage/workspace-store';
+import type { PointAskWorkspace } from '../src/shared/local-thread';
+import { deriveWorkspaceControlVisibility, isActiveWorkspaceThread } from '../src/components/workspace-control-visibility';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -31,7 +35,37 @@ function record(status: PendingAssociation['localThread']['status'] = 'waiting_f
 
 const candidate = { element: document.createElement('article'), fingerprint: 'answer', streaming: false };
 
+function workspace(): PointAskWorkspace {
+  return { id: 'workspace-1', sourceConversationKey: 'https://chatgpt.com/c/source', sourceConversationUrl: 'https://chatgpt.com/c/source',
+    targetConversationUrl: 'https://chatgpt.com/c/local-fixture', workspaceType: 'new_conversation', threadCount: 1,
+    approximateContentLength: 20, contextState: { contextVersion: 1, unsyncedMessageCount: 0, unsyncedTurnCount: 0, status: 'fresh' },
+    createdAt: timestamp, updatedAt: timestamp };
+}
+
+function workspaceRecord(id = 'thread-1', displayId = 'PA-003', status: PendingAssociation['localThread']['status'] = 'waiting_for_submission') {
+  const value = record(status);
+  return { ...value, pendingThread: { ...value.pendingThread, id: `pending-${id}`, threadId: id, workspaceId: 'workspace-1', displayId,
+    targetConversationUrl: 'https://chatgpt.com/c/local-fixture' }, localThread: { ...value.localThread, id, displayId, workspaceId: 'workspace-1' },
+  targetConversationUrl: 'https://chatgpt.com/c/local-fixture' };
+}
+
+function runtimeFor(records: PendingAssociation[]) {
+  const listeners = new Set<(message: unknown) => void>();
+  return { sendMessage: vi.fn().mockImplementation((message: { type: string }) => Promise.resolve(message.type === 'pointask:get-page-pending-threads'
+    ? { ok: true, data: records } : { ok: true, data: records[0] })), onMessage: {
+    addListener: (listener: (message: unknown) => void) => listeners.add(listener),
+    removeListener: (listener: (message: unknown) => void) => listeners.delete(listener),
+  } };
+}
+
 describe('Workspace control state', () => {
+  it('derives active and display state from persisted round lifecycle instead of activeThreadId', () => {
+    expect(isActiveWorkspaceThread(workspaceRecord())).toBe(true);
+    expect(isActiveWorkspaceThread(workspaceRecord('done', 'PA-004', 'answer_attached'))).toBe(false);
+    expect(deriveWorkspaceControlVisibility(true, 0, false)).toBe('collapsed_idle');
+    expect(deriveWorkspaceControlVisibility(true, 1, false)).toBe('collapsed_active');
+    expect(deriveWorkspaceControlVisibility(false, 1, true)).toBe('hidden');
+  });
   it('maps each state to at most one primary action and does not duplicate sending text', () => {
     const states = [
       deriveWorkspaceControlState({ record: record(), reliable: false, sending: false, selectionLength: 0, returnFailed: false }),
@@ -77,6 +111,77 @@ describe('Workspace control state', () => {
     const next = manager.prepareNext(first.id, '第二问', 'prompt-2', 'compact', [], 'round-2')!;
     expect(next.id).not.toBe(first.id); expect(next.threadId).toBe(first.id); expect(next.roundId).toBe('round-2');
     expect(manager.get(first.id)?.id).toBe(next.id);
+  });
+});
+
+describe('Workspace control visibility recovery', () => {
+  it('shows an active card and preserves a user collapse across state changes and page reopen', async () => {
+    const driver = new MemoryStorageDriver(); const store = new WorkspaceStore(driver); await store.upsert(workspace());
+    const active = workspaceRecord(); const runtime = runtimeFor([active]);
+    const first = new PendingBannerManager(new WebConversationBridge(runtime), new ClipboardManager(undefined, () => false), undefined, undefined, store);
+    await act(async () => first.start());
+    let host = document.querySelector<HTMLElement>('pointask-pending-thread-banner')!;
+    expect(host.shadowRoot?.textContent).toContain('PA-003');
+    await act(() => (host.shadowRoot?.querySelector('.pointask-control-toggle') as HTMLButtonElement).click());
+    expect(host.shadowRoot?.querySelector('.pointask-workspace-control')?.classList.contains('pointask-collapsed')).toBe(true);
+    await act(() => first.applyRecord({ ...active, localThread: { ...active.localThread, status: 'answer_ready' } }));
+    expect(host.shadowRoot?.querySelector('.pointask-workspace-control')?.classList.contains('pointask-collapsed')).toBe(true);
+    await act(() => first.stop());
+
+    const reopened = new PendingBannerManager(new WebConversationBridge(runtime), new ClipboardManager(undefined, () => false), undefined, undefined, store);
+    await act(async () => reopened.start()); host = document.querySelector('pointask-pending-thread-banner')!;
+    expect(host.shadowRoot?.querySelector('.pointask-workspace-control')?.classList.contains('pointask-collapsed')).toBe(true);
+    expect((await store.get('workspace-1'))?.controlCardState).toMatchObject({ collapsed: true, activeThreadId: 'thread-1' });
+    await act(() => reopened.stop());
+  });
+
+  it('keeps a compact idle entry on a Workspace and hides the control elsewhere', async () => {
+    const driver = new MemoryStorageDriver(); const store = new WorkspaceStore(driver); await store.upsert(workspace());
+    const idle = new PendingBannerManager(new WebConversationBridge(runtimeFor([])), new ClipboardManager(undefined, () => false), undefined, undefined, store);
+    await act(async () => idle.start());
+    let host = document.querySelector<HTMLElement>('pointask-pending-thread-banner')!;
+    expect(host.style.display).toBe('block'); expect(host.shadowRoot?.textContent).toContain('暂无活跃追问');
+    expect(host.shadowRoot?.querySelector('.pointask-workspace-control')?.classList.contains('pointask-collapsed')).toBe(true);
+    await act(() => idle.stop());
+
+    const hidden = new PendingBannerManager(new WebConversationBridge(runtimeFor([])), new ClipboardManager(undefined, () => false));
+    await act(async () => hidden.start()); host = document.querySelector<HTMLElement>('pointask-pending-thread-banner')!;
+    expect(host.style.display).toBe('none'); await act(() => hidden.stop());
+  });
+
+  it('revalidates an invalid hint, restores a unique active thread, and does not guess among multiple threads', async () => {
+    const driver = new MemoryStorageDriver(); const store = new WorkspaceStore(driver); await store.upsert({ ...workspace(), controlCardState: {
+      collapsed: true, activeThreadId: 'missing-thread', hasAutoExpanded: true, updatedAt: timestamp,
+    } });
+    const only = workspaceRecord('thread-2', 'PA-004');
+    const unique = new PendingBannerManager(new WebConversationBridge(runtimeFor([only])), new ClipboardManager(undefined, () => false), undefined, undefined, store);
+    await act(async () => unique.start());
+    expect(document.querySelector('pointask-pending-thread-banner')?.shadowRoot?.textContent).toContain('PA-004');
+    expect((await store.get('workspace-1'))?.controlCardState?.activeThreadId).toBe('thread-2');
+    await act(() => unique.stop());
+
+    await store.updateControlCardState('workspace-1', { collapsed: true, activeThreadId: 'missing-again', hasAutoExpanded: true, updatedAt: timestamp });
+    const values = [workspaceRecord('thread-2', 'PA-004'), workspaceRecord('thread-3', 'PA-005')];
+    const multiple = new PendingBannerManager(new WebConversationBridge(runtimeFor(values)), new ClipboardManager(undefined, () => false), undefined, undefined, store);
+    await act(async () => multiple.start()); const shadow = document.querySelector('pointask-pending-thread-banner')?.shadowRoot;
+    expect(shadow?.textContent).toContain('2 个待处理追问，请选择线程');
+    expect((shadow?.querySelector('select') as HTMLSelectElement).value).toBe('');
+    expect((await store.get('workspace-1'))?.controlCardState?.activeThreadId).toBeUndefined();
+    await act(() => multiple.stop());
+  });
+
+  it('switches to idle after completion and does not duplicate the host during DOM redraw', async () => {
+    const driver = new MemoryStorageDriver(); const store = new WorkspaceStore(driver); await store.upsert(workspace());
+    const active = workspaceRecord(); const manager = new PendingBannerManager(new WebConversationBridge(runtimeFor([active])),
+      new ClipboardManager(undefined, () => false), undefined, undefined, store);
+    await act(async () => manager.start());
+    document.body.append(document.createElement('div'));
+    expect(document.querySelectorAll('pointask-pending-thread-banner')).toHaveLength(1);
+    await act(() => manager.applyRecord({ ...active, associationStatus: 'completed', localThread: { ...active.localThread, status: 'answer_attached' } }));
+    const shadow = document.querySelector('pointask-pending-thread-banner')?.shadowRoot;
+    expect(shadow?.textContent).toContain('暂无活跃追问');
+    expect(shadow?.querySelector('.pointask-workspace-control')?.classList.contains('pointask-collapsed')).toBe(true);
+    await act(() => manager.stop());
   });
 });
 

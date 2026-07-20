@@ -12,12 +12,13 @@ export interface ContinueWorkspaceResult { ok: boolean; captureFailed?: boolean;
 
 export function WorkspaceControlCard({ record, records, rounds, state, expanded, busy, error, selectionSummary,
   onToggleExpanded, onSwitch, onPrimary, onReturn, onContinue, onAttachRounds, onClearSelection,
-  onAttachOnly, onUnlink, onCopyPrompt, debugInfo }: {
+  onAttachOnly, onUnlink, onCopyPrompt, debugInfo, otherActiveCount = 0 }: {
   record: PendingAssociation; records: PendingAssociation[]; rounds: SelectableRound[]; state: WorkspaceControlDerivedState; expanded: boolean;
   busy: boolean; error?: string; selectionSummary?: string; onToggleExpanded(): void; onSwitch(id: string): void;
   onPrimary(): void; onReturn(): void; onContinue(question: string, skipCapture?: boolean): Promise<boolean | ContinueWorkspaceResult>;
   onAttachRounds(ids: string[]): Promise<boolean>;
   onClearSelection(): void; onAttachOnly(): void; onUnlink(): void; onCopyPrompt(): void; debugInfo?: string;
+  otherActiveCount?: number;
 }) {
   const [view, setView] = useState<View>('status');
   const [question, setQuestion] = useState('');
@@ -51,12 +52,14 @@ export function WorkspaceControlCard({ record, records, rounds, state, expanded,
 
   if (!expanded) return <aside role="complementary" aria-label="PointAsk 当前局部线程" className="pointask-workspace-control pointask-collapsed">
     <WorkspaceControlHeader record={record} records={records} expanded={false} onToggle={onToggleExpanded} onSwitch={onSwitch} />
-    <div className="pointask-collapsed-status" aria-live="polite">{state.label}</div>
+    <div className="pointask-collapsed-status" aria-live="polite">{error && <span className="pointask-collapsed-error" title={error}>● </span>}{state.label}
+      {otherActiveCount > 0 && <small>另有 {otherActiveCount} 个待处理追问</small>}</div>
   </aside>;
 
   return <aside role="complementary" aria-label="PointAsk 当前局部线程" className="pointask-workspace-control">
     <WorkspaceControlHeader record={record} records={records} expanded onToggle={onToggleExpanded} onSwitch={onSwitch} />
     <div className="pointask-control-space-title">共享追问空间</div>
+    {otherActiveCount > 0 && <div className="pointask-control-other-count">另有 {otherActiveCount} 个待处理追问</div>}
     <div id="pointask-workspace-control-body" className="pointask-control-body">
       {view === 'continue' ? <ContinueQuestionView displayId={record.localThread.displayId} roundNumber={rounds.length} value={question}
         sending={busy} captureFailed={captureFailed} error={continueError} onChange={setQuestion}

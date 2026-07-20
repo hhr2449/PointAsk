@@ -42,7 +42,7 @@ if (adapter.isSupportedPage()) {
   const threads = new InlineThreadManager(
     pendingThreads, clipboard, webBridge, undefined, undefined, threadStore, pendingStore, metrics, workspaceStore, adapter, operationAuthorizer,
   );
-  const banner = new PendingBannerManager(webBridge, clipboard, adapter, operationAuthorizer);
+  const banner = new PendingBannerManager(webBridge, clipboard, adapter, operationAuthorizer, workspaceStore);
   banner.setReturnToThreadHandler((id) => threads.reveal(id));
   const attachment = new AnswerAttachmentMount(webBridge, operationAuthorizer);
   const answerNavigation = new AnswerNavigationManager(adapter, webBridge);
