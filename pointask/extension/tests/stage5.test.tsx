@@ -115,7 +115,7 @@ describe('manual answer confirmation and storage', () => {
     const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }), new ClipboardManager(undefined, () => false), adapter, { authorize } as never);
     act(() => manager.applyRecord(record));
     expect(document.querySelector('pointask-pending-thread-banner')?.shadowRoot?.textContent)
-      .toContain('点击下方按钮后才会填入并发送');
+      .toContain('发送追问');
     expect(fillComposer).not.toHaveBeenCalled();
     expect(submitComposer).not.toHaveBeenCalled();
     const execute = manager as unknown as { fill(id: string): Promise<boolean> };
@@ -316,8 +316,7 @@ describe('manual answer confirmation and storage', () => {
       { authorize: vi.fn().mockResolvedValue(true) } as never);
     await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
     const banner = document.querySelector('pointask-pending-thread-banner')?.shadowRoot;
-    expect(banner?.textContent).toContain('附加回答');
-    expect(banner?.textContent).toContain('附加并返回');
+    expect(banner?.textContent).toContain('附加最新回答并返回');
     const attachAndReturn = manager as unknown as { attachWhole(id: string, returnAfter: boolean): Promise<void> };
     await act(async () => { await attachAndReturn.attachWhole('workspace-attach-return', true); });
     expect(calls.indexOf('pointask:attach-answer')).toBeGreaterThanOrEqual(0);
@@ -376,10 +375,9 @@ describe('manual answer confirmation and storage', () => {
       await Promise.resolve();
     });
     const banner = document.querySelector('pointask-pending-thread-banner')?.shadowRoot;
-    expect(banner?.textContent).toContain('匹配不唯一');
-    expect(banner?.textContent).toContain('框选部分附加');
-    expect(banner?.textContent).not.toContain('附加并返回');
-    expect(banner?.textContent).not.toContain('附加回答');
+    expect(banner?.textContent).toContain('匹配不明确');
+    expect(banner?.textContent).toContain('先选择回答内容');
+    expect(banner?.textContent).not.toContain('附加最新回答并返回');
     act(() => manager.stop());
   });
 

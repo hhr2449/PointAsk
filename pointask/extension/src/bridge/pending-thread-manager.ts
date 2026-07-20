@@ -5,6 +5,10 @@ import { stableTextHash } from '../shared/text-utils';
 
 export interface PendingThread {
   id: string;
+  /** Stable local thread id. Legacy records use id as the thread id. */
+  threadId?: string;
+  /** User-message id for the round represented by this pending operation. */
+  roundId?: string;
   sourcePageUrl: string;
   sourceConversationKey: string;
   sourceMessageFingerprint: string;
@@ -19,7 +23,6 @@ export interface PendingThread {
   displayId: string;
   answerMode: AnswerMode;
   workspaceId?: string;
-  threadId?: string;
   targetTabId?: number;
   targetConversationKey?: string;
   promptHash?: string;
@@ -43,6 +46,8 @@ export interface CreatePendingThreadInput {
   viewAnchor?: ViewAnchor;
   promptHash?: string;
   assistantFingerprintsBefore?: string[];
+  threadId?: string;
+  roundId?: string;
 }
 
 let nextPendingId = 1;
@@ -80,40 +85,44 @@ export class PendingThreadManager {
       displayId: input.displayId ?? 'PA-001',
       answerMode: input.answerMode ?? 'dedicated_branch',
       workspaceId: input.workspaceId,
-      threadId: '',
+      threadId: input.threadId ?? '',
+      roundId: input.roundId,
       promptHash: input.promptHash ?? stableTextHash(generatedPrompt),
       assistantFingerprintsBefore: input.assistantFingerprintsBefore ?? [],
       richSelection: input.richSelection,
       viewAnchor: input.viewAnchor,
     };
-    thread.threadId = thread.id;
+    thread.threadId ||= thread.id;
     this.threads.set(thread.id, thread);
     return thread;
   }
 
   markWaitingForAnswer(id: string): PendingThread | null {
-    const thread = this.threads.get(id);
+    const thread = this.get(id);
     if (!thread) return null;
     const updated = { ...thread, status: 'waiting_for_answer' as const, updatedAt: this.now().toISOString() };
-    this.threads.set(id, updated);
+    this.threads.set(thread.id, updated);
     return updated;
   }
   markWaitingForSubmission(id: string): PendingThread | null {
-    const thread = this.threads.get(id); if (!thread) return null;
+    const thread = this.get(id); if (!thread) return null;
     const updated = { ...thread, status: 'waiting_for_submission' as const, updatedAt: this.now().toISOString() };
-    this.threads.set(id, updated); return updated;
+    this.threads.set(thread.id, updated); return updated;
   }
   markFailed(id: string): PendingThread | null {
-    const thread = this.threads.get(id); if (!thread) return null;
+    const thread = this.get(id); if (!thread) return null;
     const updated = { ...thread, status: 'failed' as const, updatedAt: this.now().toISOString() };
-    this.threads.set(id, updated); return updated;
+    this.threads.set(thread.id, updated); return updated;
   }
 
-  prepareNext(id: string, question: string, generatedPrompt: string, promptMode: PromptMode, assistantFingerprintsBefore?: string[]): PendingThread | null {
-    const thread = this.threads.get(id);
+  prepareNext(id: string, question: string, generatedPrompt: string, promptMode: PromptMode, assistantFingerprintsBefore?: string[], roundId?: string): PendingThread | null {
+    const thread = this.get(id);
     if (!thread || !question.trim() || !generatedPrompt.trim()) return null;
     const updated: PendingThread = {
       ...thread,
+      id: this.createId(),
+      threadId: thread.threadId || thread.id,
+      roundId,
       question: question.trim(),
       generatedPrompt: generatedPrompt.trim(),
       promptHash: stableTextHash(generatedPrompt),
@@ -125,16 +134,18 @@ export class PendingThreadManager {
       status: 'prompt_ready',
       updatedAt: this.now().toISOString(),
     };
-    this.threads.set(id, updated);
+    this.threads.delete(thread.id);
+    this.threads.set(updated.id, updated);
     return updated;
   }
 
   get(id: string): PendingThread | null {
-    return this.threads.get(id) ?? null;
+    return this.threads.get(id) ?? [...this.threads.values()].find((thread) => (thread.threadId || thread.id) === id) ?? null;
   }
 
   delete(id: string): boolean {
-    return this.threads.delete(id);
+    const thread = this.get(id);
+    return thread ? this.threads.delete(thread.id) : false;
   }
 
   list(): PendingThread[] {
@@ -142,19 +153,21 @@ export class PendingThreadManager {
   }
 
   restore(thread: PendingThread): void {
+    const threadId = thread.threadId || thread.id;
+    for (const [id, current] of this.threads) if (id !== thread.id && (current.threadId || current.id) === threadId) this.threads.delete(id);
     this.threads.set(thread.id, thread);
   }
 
   updateQuestion(id: string, question: string): PendingThread | null {
-    const thread = this.threads.get(id);
+    const thread = this.get(id);
     if (!thread || !question.trim()) return null;
     const updated = { ...thread, question: question.trim(), updatedAt: this.now().toISOString() };
-    this.threads.set(id, updated);
+    this.threads.set(thread.id, updated);
     return updated;
   }
   updateRouting(id: string, answerMode: AnswerMode, workspaceId?: string, targetConversationUrl?: string): PendingThread | null {
-    const thread = this.threads.get(id); if (!thread) return null;
+    const thread = this.get(id); if (!thread) return null;
     const updated = { ...thread, answerMode, workspaceId, targetConversationUrl, updatedAt: this.now().toISOString() };
-    this.threads.set(id, updated); return updated;
+    this.threads.set(thread.id, updated); return updated;
   }
 }

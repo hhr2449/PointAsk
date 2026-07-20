@@ -84,6 +84,19 @@ async function waitForReadyTarget(tabs: TabGateway, tabId: number, targetConvers
   throw new Error(lastError);
 }
 
+async function waitForSourceThread(tabs: TabGateway, tabId: number, threadId: string): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    await tabs.sendMessage(tabId, { type: 'pointask:thread-return-ready', threadId }).catch(() => undefined);
+    const response = await tabs.sendMessage(tabId, { type: 'pointask:probe-thread-return', threadId }).catch(() => null) as { ready?: boolean } | null;
+    if (response?.ready) return;
+    // Older installed content scripts do not implement the probe. The ready
+    // notification above preserves compatibility during extension updates.
+    if (response && response.ready === undefined) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error('已打开原会话，但 PointAsk 卡片尚未恢复，请重试返回');
+}
+
 const activeWorkspaceAttempts = new Map<string, string>();
 
 interface RuntimeDependencies {
@@ -116,7 +129,7 @@ async function persist(record: PendingAssociation, deps: RuntimeDependencies): P
   void _transientTargetTabId;
   await Promise.all([
     deps.threadStore?.upsert(record.localThread),
-    deps.pendingStore?.upsert(storedPendingThread),
+    deps.pendingStore?.replaceForThread(storedPendingThread),
   ]);
   if (record.localThread.answerMode === 'workspace' && record.localThread.workspaceId && record.targetConversationUrl) {
     const workspace = await deps.workspaceStore?.get(record.localThread.workspaceId);
@@ -154,7 +167,8 @@ async function ensureSourceRecord(id: string, senderTabId: number, senderUrl: st
     return deps.coordinator.restore(record.pendingThread, record.localThread, senderTabId);
   }
   if (!deps.threadStore || !deps.pendingStore) return record;
-  const [thread, pending] = await Promise.all([deps.threadStore.get(id), deps.pendingStore.get(id)]);
+  const pending = await deps.pendingStore.get(id);
+  const thread = await deps.threadStore.get(pending?.threadId || id);
   if (!thread || !pending || !senderMatchesSource(senderUrl, thread.sourceConversationKey)) return record;
   return deps.coordinator.restore(pending, thread, senderTabId);
 }
@@ -166,7 +180,8 @@ async function ensureTargetRecord(id: string, senderTabId: number, senderUrl: st
   }
   if (existing) return existing;
   if (!senderUrl || !deps.threadStore || !deps.pendingStore) return null;
-  const [thread, pending] = await Promise.all([deps.threadStore.get(id), deps.pendingStore.get(id)]);
+  const pending = await deps.pendingStore.get(id);
+  const thread = await deps.threadStore.get(pending?.threadId || id);
   if (!thread || !pending || !thread.targetConversationUrl || !isCompatibleChatGptTargetUrl(thread.targetConversationUrl, senderUrl)) return null;
   deps.coordinator.restore(pending, thread, -1);
   return deps.coordinator.markTargetOpened(id, senderTabId, senderUrl);
@@ -187,11 +202,21 @@ export async function handleRuntimeMessage(
   try {
     switch (message.type) {
       case 'pointask:create-pending-thread': {
-        const stored = await deps.threadStore?.get(message.pendingThread.id);
-        if (stored && (stored.createdAt !== message.pendingThread.createdAt || stored.sourceMessageFingerprint !== message.pendingThread.sourceMessageFingerprint)) {
+        const stored = await deps.threadStore?.get(message.pendingThread.threadId || message.pendingThread.id);
+        if (stored && stored.id !== (message.pendingThread.threadId || message.pendingThread.id)) {
           throw new Error('线程标识冲突，请刷新页面后重试');
         }
-        const record = deps.coordinator.create(message.pendingThread, senderTabId, message.localThread);
+        const threadId = message.pendingThread.threadId || message.pendingThread.id;
+        const previous = deps.coordinator.findByThreadId(threadId);
+        const continuedFromTarget = Boolean(message.localThread && previous?.targetTabId === senderTabId && previous.sourceTabId !== senderTabId);
+        if (previous && previous.pendingThread.id !== message.pendingThread.id) {
+          const retired = deps.coordinator.retireForContinuation(previous.pendingThread.id);
+          if (retired) await notify(retired, deps.tabs);
+        }
+        let record = deps.coordinator.create(message.pendingThread, continuedFromTarget ? previous!.sourceTabId : senderTabId, message.localThread);
+        if (continuedFromTarget && sender.tab?.url) {
+          record = deps.coordinator.markTargetOpened(message.pendingThread.id, senderTabId, sender.tab.url) ?? record;
+        }
         await persist(record, deps);
         return { ok: true, data: record };
       }
@@ -325,9 +350,8 @@ export async function handleRuntimeMessage(
       case 'pointask:attach-answer': {
         let existing = deps.coordinator.get(message.pendingThreadId);
         if (!existing && deps.threadStore && deps.pendingStore) {
-          const [localThread, pendingThread] = await Promise.all([
-            deps.threadStore.get(message.pendingThreadId), deps.pendingStore.get(message.pendingThreadId),
-          ]);
+          const pendingThread = await deps.pendingStore.get(message.pendingThreadId);
+          const localThread = await deps.threadStore.get(pendingThread?.threadId || message.pendingThreadId);
           const currentConversationTarget = localThread?.answerMode === 'current_conversation' &&
             senderMatchesSource(message.targetUrl, localThread.sourceConversationKey);
           if (localThread && pendingThread && (currentConversationTarget || localThread.targetConversationUrl &&
@@ -362,9 +386,8 @@ export async function handleRuntimeMessage(
         if (!existing) throw new Error('Pending thread not found');
         if (message.action === 'return-source') {
           if (existing.targetTabId !== senderTabId) throw new Error('Only the target tab may return to source');
-          const completed = deps.coordinator.completeReturn(message.pendingThreadId, senderTabId);
-          if (completed) { await persist(completed, deps); await notify(completed, deps.tabs); }
           const sourceUrl = existing.localThread.sourceConversationKey || existing.pendingThread.sourcePageUrl;
+          const threadId = existing.localThread.id;
           let sourceTab: { id?: number; url?: string } | null = null;
           if (existing.sourceTabId >= 0 && deps.tabs.get) {
             const remembered = await deps.tabs.get(existing.sourceTabId).catch(() => null);
@@ -382,13 +405,15 @@ export async function handleRuntimeMessage(
           if (sourceTab.id === undefined) throw new Error('无法返回来源页面');
           await deps.threadReturnStore?.set({
             id: `pointask-thread-return-${Date.now()}`,
-            threadId: message.pendingThreadId,
+            threadId,
             sourceConversationUrl: sourceUrl,
             createdAt: new Date().toISOString(),
           });
           await deps.tabs.update(sourceTab.id, { active: true });
-          deps.coordinator.restore((completed ?? existing).pendingThread, (completed ?? existing).localThread, sourceTab.id);
-          await deps.tabs.sendMessage(sourceTab.id, { type: 'pointask:thread-return-ready', threadId: message.pendingThreadId }).catch(() => undefined);
+          deps.coordinator.restore(existing.pendingThread, existing.localThread, sourceTab.id);
+          await waitForSourceThread(deps.tabs, sourceTab.id, threadId);
+          const completed = deps.coordinator.completeReturn(message.pendingThreadId, senderTabId);
+          if (completed) { await persist(completed, deps); await notify(completed, deps.tabs); }
           if (completed && settings?.closeDedicatedTabAfterAttach && existing.localThread.answerMode === 'dedicated_branch' &&
             existing.targetTabId !== undefined && existing.targetTabId !== sourceTab.id && deps.tabs.get && deps.tabs.remove) {
             const target = await deps.tabs.get(existing.targetTabId).catch(() => null);
@@ -423,7 +448,7 @@ export async function handleRuntimeMessage(
             ? isCompatibleChatGptTargetUrl(item.sourceConversationKey, message.currentUrl)
             : Boolean(item.targetConversationUrl && isCompatibleChatGptTargetUrl(item.targetConversationUrl, message.currentUrl));
         })) {
-          const pending = pendingThreads.find((item) => item.id === thread.id);
+          const pending = pendingThreads.find((item) => (item.threadId || item.id) === thread.id);
           if (!pending) continue;
           deps.coordinator.restore(pending, thread, -1);
           const record = deps.coordinator.markTargetOpened(thread.id, senderTabId, message.currentUrl);
@@ -437,7 +462,7 @@ export async function handleRuntimeMessage(
           deps.threadStore.listByConversation(message.conversationKey), deps.pendingStore.list(),
         ]);
         const restored = threads.flatMap((thread) => {
-          const pending = pendingThreads.find((item) => item.id === thread.id);
+          const pending = pendingThreads.find((item) => (item.threadId || item.id) === thread.id);
           return pending ? [deps.coordinator.restore(pending, thread, senderTabId)] : [];
         });
         return { ok: true, data: restored };

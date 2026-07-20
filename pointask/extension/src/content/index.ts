@@ -161,6 +161,7 @@ if (adapter.isSupportedPage()) {
   void threads.refreshWorkspaceContextProgress().catch(() => undefined);
   webBridge.onPendingUpdated((record) => threads.handleAssociationUpdate(record));
   webBridge.onThreadReturnReady(() => { void restoreSourceThreads().then(revealReturnedThread).catch(() => undefined); });
+  webBridge.onThreadReturnProbe((threadId) => threads.reveal(threadId));
   const toolbar = new SelectionToolbar({
     onFollowUp: (selection) => {
       const data = hydrateSelectionContext(adapter, selection);
@@ -202,6 +203,7 @@ if (adapter.isSupportedPage()) {
     },
   });
   const selectionManager = new SelectionManager(adapter, (data) => {
+    banner.setSelection(data);
     if (data) toolbar.show(data, banner.getAttachmentAssociations());
     else toolbar.hide();
   }, () => banner.getAttachmentAssociations().length === 0);

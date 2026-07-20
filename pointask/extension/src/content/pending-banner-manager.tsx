@@ -3,8 +3,10 @@ import type { ClipboardManager } from '../bridge/clipboard-manager';
 import type { PendingAssociation } from '../bridge/runtime-messages';
 import type { WebConversationBridge } from '../bridge/web-conversation-bridge';
 import { PendingThreadBanner } from '../components/pending-thread-banner';
+import { WorkspaceControlCard } from '../components/workspace-control-card';
+import { deriveWorkspaceControlState } from '../components/workspace-control-state';
 import { CurrentAnswerActions } from '../components/current-answer-actions';
-import { bannerStyles, currentAnswerActionStyles } from './shadow-styles';
+import { bannerStyles, currentAnswerActionStyles, workspaceControlStyles } from './shadow-styles';
 import { isCompatibleChatGptTargetUrl } from '../bridge/runtime-messages';
 import type { SiteAdapter } from '../adapters/site-adapter';
 import type { CandidateAnswer } from '../adapters/site-adapter';
@@ -15,6 +17,9 @@ import type { OperationAuthorizer } from './operation-authorizer';
 import { showAttachmentUndo, showOperationToast } from './operation-feedback';
 import { applyPointAskTheme } from './theme';
 import type { SelectionData } from './selection-manager';
+import { buildPrompt } from '../bridge/prompt-builder';
+import { stableTextHash } from '../shared/text-utils';
+import { textBlocks } from '../shared/rich-content';
 
 interface MountedAnswerAction {
   host: HTMLElement;
@@ -46,6 +51,10 @@ export class PendingBannerManager {
   private readonly returnedIds = new Set<string>();
   private partialSelectionId: string | null = null;
   private returnToThreadHandler: ((id: string) => boolean) | null = null;
+  private activeWorkspacePendingId: string | null = null;
+  private workspaceExpanded = true;
+  private workspaceSelection: SelectionData | null = null;
+  private readonly returnFailedIds = new Set<string>();
 
   constructor(
     private readonly bridge: WebConversationBridge,
@@ -58,7 +67,7 @@ export class PendingBannerManager {
     applyPointAskTheme(this.host);
     const shadow = this.host.attachShadow({ mode: 'open' });
     const style = document.createElement('style');
-    style.textContent = `${bannerStyles}\n${richContentStyles}`;
+    style.textContent = `${bannerStyles}\n${workspaceControlStyles}\n${richContentStyles}`;
     const mount = document.createElement('div');
     shadow.append(style, mount);
     document.documentElement.append(this.host);
@@ -111,6 +120,12 @@ export class PendingBannerManager {
     return this.partialSelectionId
       ? records.filter((record) => record.pendingThread.id === this.partialSelectionId)
       : records.filter((record) => record.localThread.answerMode !== 'current_conversation');
+  }
+
+  setSelection(data: SelectionData | null): void {
+    this.workspaceSelection = data && [...this.candidates.values()].some((candidate) =>
+      candidate.fingerprint === data.messageFingerprint && candidate.element === data.sourceMessageElement) ? data : null;
+    this.render();
   }
 
   setReturnToThreadHandler(handler: (id: string) => boolean): void {
@@ -167,10 +182,39 @@ export class PendingBannerManager {
       record.localThread.answerMode !== 'current_conversation');
     const attachableIds = new Set([...this.candidates].filter(([id, candidate]) =>
       this.isReliableCandidate(id, candidate)).map(([id]) => id));
+    const workspaceRecords = visible.filter((record) => record.localThread.answerMode === 'workspace')
+      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+    const legacyRecords = visible.filter((record) => record.localThread.answerMode !== 'workspace');
+    let active = workspaceRecords.find((record) => record.pendingThread.id === this.activeWorkspacePendingId);
+    if (!active && workspaceRecords.length === 1) active = workspaceRecords[0];
+    if (!active) active = workspaceRecords.find((record) => !['answer_attached'].includes(record.localThread.status)) ?? workspaceRecords[0];
+    if (active) this.activeWorkspacePendingId = active.pendingThread.id;
     this.host.style.display = visible.length ? 'block' : 'none';
+    this.host.classList.toggle('pointask-has-workspace-control', Boolean(active));
+    const activeCandidate = active ? this.candidates.get(active.pendingThread.id) : undefined;
+    const activeReliable = Boolean(active && activeCandidate && this.isReliableCandidate(active.pendingThread.id, activeCandidate));
+    const activeSelection = active && activeCandidate && this.workspaceSelection?.messageFingerprint === activeCandidate.fingerprint
+      ? this.workspaceSelection : null;
     this.root.render(
-      <PendingThreadBanner
-        records={visible}
+      <>
+      {active && <WorkspaceControlCard record={active} records={workspaceRecords.slice(0, 6)} expanded={this.workspaceExpanded}
+        state={deriveWorkspaceControlState({ record: active, candidate: activeCandidate, reliable: activeReliable,
+          sending: this.sendingIds.has(active.pendingThread.id), selectionLength: activeSelection?.selectedText.length ?? 0,
+          returnFailed: this.returnFailedIds.has(active.pendingThread.id) })}
+        busy={this.sendingIds.has(active.pendingThread.id) || this.attachingIds.has(active.pendingThread.id)}
+        error={this.errors.get(active.pendingThread.id)} selectionSummary={activeSelection ? `${activeSelection.selectedText.length} 个字符：${activeSelection.selectedText.slice(0, 36)}${activeSelection.selectedText.length > 36 ? '…' : ''}` : undefined}
+        onToggleExpanded={() => { this.workspaceExpanded = !this.workspaceExpanded; this.render(); }}
+        onSwitch={(id) => { this.activeWorkspacePendingId = id; this.workspaceSelection = null; this.render(); }}
+        onPrimary={() => void this.runWorkspacePrimary(active!.pendingThread.id)} onReturn={() => void this.returnToSource(active!.pendingThread.id)}
+        onContinue={(question) => this.continueWorkspaceThread(active!.pendingThread.id, question)}
+        onAttachRounds={(ids) => this.attachWorkspaceRounds(active!.pendingThread.id, ids)}
+        onClearSelection={() => { window.getSelection()?.removeAllRanges(); this.workspaceSelection = null; this.render(); }}
+        onAttachOnly={() => void this.attachWorkspaceAnswer(active!.pendingThread.id, false)}
+        onUnlink={() => void this.unlink(active!.pendingThread.id)} onCopyPrompt={() => void this.copy(active!.pendingThread.id)}
+        debugInfo={import.meta.env.DEV ? JSON.stringify({ pendingId: active.pendingThread.id, threadId: active.localThread.id,
+          roundId: active.pendingThread.roundId, status: active.localThread.status }, null, 2) : undefined} />}
+      {legacyRecords.length > 0 && <PendingThreadBanner
+        records={legacyRecords}
         copiedIds={this.copiedIds}
         errors={this.errors}
         confirmingIds={this.confirmingIds}
@@ -186,7 +230,8 @@ export class PendingBannerManager {
         onAttachAndReturn={(id) => void this.attachWhole(id, true)}
         onSelectPartial={(id) => this.selectPartial(id)}
         onUndo={(id) => void this.undo(id)}
-      />,
+      />}
+      </>,
     );
   }
 
@@ -203,12 +248,93 @@ export class PendingBannerManager {
     this.render();
   }
 
+  private async runWorkspacePrimary(id: string): Promise<void> {
+    const record = this.records.get(id); if (!record) return;
+    if (this.returnFailedIds.has(id) || record.localThread.status === 'answer_attached') {
+      await this.returnToSource(id); return;
+    }
+    if (record.localThread.status === 'failed' || record.pendingThread.status === 'failed' ||
+      record.pendingThread.submittedPromptHash !== record.pendingThread.promptHash && !this.candidates.has(id)) {
+      await this.fill(id); return;
+    }
+    await this.attachWorkspaceAnswer(id, true);
+  }
+
+  private async attachWorkspaceAnswer(id: string, returnAfter: boolean): Promise<boolean> {
+    const record = this.records.get(id); const candidate = this.candidates.get(id);
+    if (!record || !candidate || candidate.streaming || this.attachingIds.has(id)) return false;
+    const selection = this.workspaceSelection?.messageFingerprint === candidate.fingerprint &&
+      this.workspaceSelection.sourceMessageElement === candidate.element ? this.workspaceSelection : null;
+    if (!selection && !this.isReliableCandidate(id, candidate)) {
+      this.errors.set(id, '回答匹配不明确，请先选择回答内容'); this.render(); return false;
+    }
+    if (this.authorizer && !(await this.authorizer.authorize())) return false;
+    this.attachingIds.add(id); this.errors.delete(id); this.render();
+    try {
+      const rich = selection?.richSelection ?? this.adapter?.getMessageRichContent(candidate.element);
+      if (!rich?.blocks.length) throw new Error('无法安全读取这条回答');
+      const updated = await this.bridge.attachAnswer(id, selection?.selectedText ?? richPlainText(rich.blocks), false,
+        window.location.href, rich.blocks, {
+          conversationUrl: window.location.href, conversationKey: this.adapter?.getConversationKey() ?? window.location.href,
+          messageFingerprint: candidate.fingerprint, selectedText: selection?.selectedText,
+          prefixText: selection?.textAnchor?.prefixText, suffixText: selection?.textAnchor?.suffixText,
+        });
+      this.records.set(id, updated); this.candidates.delete(id); this.workspaceSelection = null; this.render();
+      if (returnAfter) await this.returnToSource(id);
+      return true;
+    } catch (error) {
+      this.errors.set(id, error instanceof Error ? error.message : '附加失败，请重试'); this.render(); return false;
+    } finally { this.attachingIds.delete(id); this.render(); }
+  }
+
+  private async attachWorkspaceRounds(id: string, roundIds: string[]): Promise<boolean> {
+    if (this.workspaceSelection) return this.attachWorkspaceAnswer(id, true);
+    const record = this.records.get(id); const latestRoundId = record?.localThread.messages.filter((message) => message.role === 'user').at(-1)?.id;
+    if (!latestRoundId || !roundIds.includes(latestRoundId)) return false;
+    return this.attachWorkspaceAnswer(id, true);
+  }
+
+  private async continueWorkspaceThread(id: string, question: string): Promise<boolean> {
+    let record = this.records.get(id); if (!record || !question.trim()) return false;
+    if (record.localThread.status !== 'answer_attached') {
+      if (!await this.attachWorkspaceAnswer(id, false)) return false;
+      record = this.records.get(id); if (!record) return false;
+    }
+    const timestamp = new Date().toISOString();
+    const roundId = `pointask-message-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const pendingId = `pointask-pending-${typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+    const generatedPrompt = buildPrompt({ selectedText: record.localThread.anchor.selectedText,
+      paragraphText: record.localThread.anchor.paragraphText, userQuestion: question.trim(), previousLocalMessages: record.localThread.messages,
+      mode: 'compact', answerMode: 'workspace', displayId: record.localThread.displayId });
+    const pending = { ...record.pendingThread, id: pendingId, threadId: record.localThread.id, roundId, question: question.trim(), generatedPrompt,
+      promptHash: stableTextHash(generatedPrompt), assistantFingerprintsBefore: this.adapter?.getAssistantMessageFingerprints() ?? [],
+      candidateAnswerFingerprint: undefined, submittedPromptHash: undefined, submittedAt: undefined, status: 'prompt_ready' as const,
+      createdAt: timestamp, updatedAt: timestamp };
+    const localThread = { ...record.localThread, messages: [...record.localThread.messages, {
+      id: roundId, role: 'user' as const, content: textBlocks(question.trim()), attachedManually: false, createdAt: timestamp,
+    }], status: 'waiting_for_submission' as const, updatedAt: timestamp };
+    this.sendingIds.add(pendingId); this.errors.delete(id); this.render();
+    try {
+      const created = await this.bridge.savePendingThread(pending, localThread);
+      this.records.delete(id); this.records.set(pendingId, created); this.activeWorkspacePendingId = pendingId;
+      this.sendingIds.delete(pendingId); this.render();
+      return await this.fill(pendingId);
+    } catch (error) {
+      this.errors.set(id, error instanceof Error ? error.message : '发送失败，请重试'); return false;
+    } finally { this.sendingIds.delete(pendingId); this.render(); }
+  }
+
+  private async unlink(id: string): Promise<void> {
+    try { const record = await this.bridge.unlinkTargetPage(id); this.records.set(id, record); this.render(); }
+    catch (error) { this.errors.set(id, error instanceof Error ? error.message : '取消关联失败'); this.render(); }
+  }
+
   private async fill(id: string, skipAuthorization = false): Promise<boolean> {
     const record = this.records.get(id);
     if (!record || this.sendingIds.has(id)) return false;
     if (record.pendingThread.submittedPromptHash === record.pendingThread.promptHash) { this.errors.set(id, '该问题已经发送'); this.render(); return false; }
     if (!skipAuthorization && this.authorizer && !(await this.authorizer.authorize())) return false;
-    this.sendingIds.add(id); this.errors.set(id, '正在发送……'); this.render();
+    this.sendingIds.add(id); this.errors.delete(id); this.render();
     try {
       if (!this.adapter || !(await this.adapter.waitForComposerReady())) throw new Error('追问空间尚未准备好，请重试');
       if (!this.adapter.fillComposer(record.pendingThread.generatedPrompt)) throw new Error('追问空间输入框暂时无法写入');
@@ -226,7 +352,7 @@ export class PendingBannerManager {
       // Commit waiting_for_answer only after ChatGPT has rendered the exact
       // user turn. button.click() alone is not proof that React accepted it.
       const reserved = await this.bridge.reservePromptSubmission(id, promptHash, window.location.href);
-      this.records.set(id, reserved); this.errors.set(id, '已发送');
+      this.records.set(id, reserved); this.errors.delete(id);
       showOperationToast('已发送');
       return true;
     } catch (error) {
@@ -454,8 +580,15 @@ export class PendingBannerManager {
       }
       return;
     }
-    await this.bridge.returnToSource(id);
-    showOperationToast('已返回原文');
+    try {
+      await this.bridge.returnToSource(id);
+      this.returnFailedIds.delete(id);
+      showOperationToast('已返回原文');
+    } catch (error) {
+      if (record.localThread.status === 'answer_attached') this.returnFailedIds.add(id);
+      this.errors.set(id, error instanceof Error ? error.message : '返回原文失败，请重试');
+      this.render();
+    }
   }
 
   private async associate(id: string, confirmed: boolean): Promise<void> {

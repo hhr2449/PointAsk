@@ -120,6 +120,49 @@ export const bannerStyles = `${sharedShadowStyles}
   .pointask-banner-feedback { min-height: 18px; margin-top: 6px; color: var(--pa-muted); font-size: 12px; }
 `;
 
+export const workspaceControlStyles = `${sharedShadowStyles}
+  :host { position: fixed; z-index: 2147483646; top: 16px; right: 16px; width: min(360px, calc(100vw - 32px)); pointer-events: none;
+    --pointask-control-radius: 14px; --pointask-control-gap: 16px; }
+  .pointask-workspace-control { position: relative; max-height: calc(100vh - 32px); overflow: auto; overscroll-behavior: contain; pointer-events: auto;
+    border: 1px solid var(--pa-border); border-radius: var(--pointask-control-radius); color: var(--pa-text); background: var(--pa-bg); box-shadow: var(--pa-shadow); font-size: 13px; line-height: 1.45; }
+  .pointask-workspace-control.pointask-collapsed { width: 240px; margin-left: auto; overflow: visible; }
+  .pointask-control-header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 48px; padding: 0 16px; background: var(--pa-bg); }
+  .pointask-control-brand { display: flex; align-items: center; min-width: 0; gap: 8px; }
+  .pointask-control-brand strong::after { content: "·"; margin-left: 8px; color: var(--pa-muted); }
+  .pointask-control-brand select { max-width: 112px; border: 1px solid var(--pa-border); border-radius: 7px; padding: 4px 6px; color: inherit; background: var(--pa-bg); font: inherit; }
+  .pointask-control-toggle { flex: none; padding: 6px; border-radius: 7px; color: var(--pa-muted); }
+  .pointask-control-toggle:hover { background: var(--pa-hover); }
+  .pointask-control-space-title { padding: 0 16px 12px; border-bottom: 1px solid var(--pa-border); color: var(--pa-muted); font-weight: 600; }
+  .pointask-collapsed-status { padding: 0 16px 12px; color: var(--pa-muted); }
+  .pointask-control-body { position: relative; }
+  .pointask-control-view { display: grid; gap: var(--pointask-control-gap); padding: 16px; }
+  .pointask-control-view section, .pointask-control-view h2, .pointask-control-view p { margin: 0; }
+  .pointask-control-view h2 { font-size: 16px; }
+  .pointask-control-view h3 { margin: 0 0 5px; color: var(--pa-muted); font-size: 12px; }
+  .pointask-control-summary { display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+  .pointask-control-status { display: flex; align-items: center; gap: 8px; color: var(--pa-muted); }
+  .pointask-control-status span { font-size: 9px; color: var(--pa-accent); }
+  .pointask-control-status-failed span, .pointask-control-status-return_failed span { color: var(--pa-danger); }
+  .pointask-control-hint, .pointask-control-error { color: var(--pa-danger); }
+  .pointask-control-selection { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px; border-radius: 8px; background: var(--pa-bg-subtle); }
+  .pointask-control-selection button, .pointask-control-low-frequency button { padding: 3px; color: var(--pa-muted); text-decoration: underline; }
+  .pointask-control-actions { display: grid; gap: 8px; }
+  .pointask-control-actions .pointask-primary { min-height: 40px; }
+  .pointask-control-low-frequency { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .pointask-continue-view textarea { width: 100%; min-height: 112px; resize: vertical; padding: 10px; border: 1px solid var(--pa-border); border-radius: 9px; color: inherit; background: var(--pa-bg-subtle); }
+  .pointask-round-options { display: grid; gap: 8px; }
+  .pointask-round-option { display: flex; align-items: flex-start; gap: 9px; padding: 9px; border: 1px solid var(--pa-border); border-radius: 9px; }
+  .pointask-round-option > span { display: grid; min-width: 0; gap: 3px; }
+  .pointask-round-option small { margin-left: 7px; color: var(--pa-muted); font-weight: normal; }
+  .pointask-round-option.pointask-disabled { opacity: .55; }
+  .pointask-control-menu { position: absolute; right: 12px; bottom: 48px; z-index: 3; display: grid; min-width: 220px; padding: 5px; border: 1px solid var(--pa-border); border-radius: 9px; background: var(--pa-bg); box-shadow: var(--pa-shadow); }
+  .pointask-control-menu button { padding: 8px; border-radius: 6px; text-align: left; }
+  .pointask-control-menu button:hover { background: var(--pa-hover); }
+  .pointask-control-menu .pointask-danger { color: var(--pa-danger); }
+  .pointask-control-menu pre { max-width: 310px; overflow: auto; margin: 5px; color: var(--pa-muted); font-size: 10px; }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; } }
+`;
+
 export const currentAnswerActionStyles = `${sharedShadowStyles}
   :host { display: block; width: 100%; margin: 8px 0 14px; }
   .pointask-current-answer-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: min(760px, 100%); margin-inline: auto; padding: 8px 10px; border: 1px solid var(--pa-border); border-radius: 9px; color: var(--pa-text); background: var(--pa-bg); box-shadow: 0 4px 14px rgb(0 0 0 / 8%); font-size: 12px; }

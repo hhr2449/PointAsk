@@ -86,7 +86,7 @@ export function isPendingThread(value: unknown): value is PendingThread {
     'id', 'sourcePageUrl', 'sourceConversationKey', 'sourceMessageFingerprint', 'anchor', 'question',
     'generatedPrompt', 'promptMode', 'status', 'createdAt', 'updatedAt', 'targetConversationUrl',
     'displayId', 'answerMode', 'workspaceId',
-    'threadId', 'targetTabId', 'targetConversationKey', 'promptHash', 'assistantFingerprintsBefore',
+    'threadId', 'roundId', 'targetTabId', 'targetConversationKey', 'promptHash', 'assistantFingerprintsBefore',
     'candidateAnswerFingerprint', 'richSelection', 'viewAnchor', 'submittedPromptHash', 'submittedAt',
   ]) && hasOnlyKeys(anchor, [
     'pageUrl', 'sourcePageUrl', 'conversationKey', 'messageFingerprint', 'assistantMessageHash', 'selectedText',
@@ -104,7 +104,8 @@ export function isPendingThread(value: unknown): value is PendingThread {
     ['workspace', 'current_conversation', 'dedicated_branch'].includes(String(value.answerMode)) &&
     /^PA-\d{3,}$/.test(String(value.displayId)) &&
     (value.workspaceId === undefined || isNonEmptyString(value.workspaceId)) &&
-    (value.threadId === undefined || value.threadId === value.id) &&
+    (value.threadId === undefined || isNonEmptyString(value.threadId)) &&
+    (value.roundId === undefined || isNonEmptyString(value.roundId)) &&
     (value.targetTabId === undefined || typeof value.targetTabId === 'number') &&
     (value.targetConversationKey === undefined || isNonEmptyString(value.targetConversationKey) && isChatGptUrl(value.targetConversationKey)) &&
     (value.promptHash === undefined || typeof value.promptHash === 'string') &&
@@ -132,7 +133,7 @@ export function isPointAskRuntimeMessage(value: unknown): value is PointAskRunti
     case 'pointask:update-local-thread':
       return hasOnlyKeys(value, ['type', 'pendingThread', 'localThread']) &&
         isPendingThread(value.pendingThread) && isLocalThread(value.localThread) &&
-        value.pendingThread.id === value.localThread.id;
+        (value.pendingThread.threadId || value.pendingThread.id) === value.localThread.id;
     case 'pointask:open-target-chat':
     case 'pointask:cancel-pending-thread':
     case 'pointask:open-answer-page':
@@ -266,7 +267,8 @@ export function isPendingAssociationUpdate(value: unknown): value is {
 } {
   if (!isRecord(value) || value.type !== 'pointask:pending-thread-updated' || !hasOnlyKeys(value, ['type', 'record'])) return false;
   const record = value.record;
-  if (!isRecord(record) || !isPendingThread(record.pendingThread) || !isLocalThread(record.localThread)) return false;
+  if (!isRecord(record) || !isPendingThread(record.pendingThread) || !isLocalThread(record.localThread) ||
+    (record.pendingThread.threadId || record.pendingThread.id) !== record.localThread.id) return false;
   return hasOnlyKeys(record, [
     'pendingThread', 'localThread', 'sourceTabId', 'targetTabId', 'targetConversationUrl', 'associationStatus', 'createdAt', 'updatedAt',
   ]) && typeof record.sourceTabId === 'number' &&

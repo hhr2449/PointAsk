@@ -165,6 +165,7 @@ export class InlineThreadManager {
       attachedManually: false,
       createdAt: timestamp,
     };
+    pending.roundId = userMessage.id;
     const thread: LocalThread = {
       id: pending.id,
       displayId,
@@ -199,7 +200,7 @@ export class InlineThreadManager {
       if (!this.webBridge) return false;
       try {
         await this.webBridge.savePendingThread(pending, item.thread);
-        const record = await this.webBridge.associateCurrentPage(id, item.thread.sourcePageUrl, true);
+        const record = await this.webBridge.associateCurrentPage(pending.id, item.thread.sourcePageUrl, true);
         const waiting = this.pendingThreads.markWaitingForSubmission(id);
         item.thread = { ...record.localThread, status: 'waiting_for_submission' };
         if (waiting) await this.webBridge.updateLocalThread(waiting, item.thread);
@@ -359,11 +360,11 @@ export class InlineThreadManager {
       const workspaceAttemptId = `pointask-attempt-${typeof crypto.randomUUID === 'function'
         ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
       const workspaceResult = item.thread.answerMode === 'workspace'
-        ? await this.webBridge.openOrAutoSendWorkspace(id, pending.promptHash ?? '', workspaceAttemptId)
+        ? await this.webBridge.openOrAutoSendWorkspace(pending.id, pending.promptHash ?? '', workspaceAttemptId)
         : null;
       const record = workspaceResult?.record ?? (item.thread.targetConversationUrl
-        ? await this.webBridge.openAnswerPage(id)
-        : await this.webBridge.openTargetChat(id));
+        ? await this.webBridge.openAnswerPage(pending.id)
+        : await this.webBridge.openTargetChat(pending.id));
       const updatedPending = this.pendingThreads.markWaitingForSubmission(id);
       if (updatedPending && !workspaceResult?.autoSent) await this.webBridge.savePendingThread(updatedPending, record.localThread);
       this.pendingThreads.restore(record.pendingThread);
@@ -394,9 +395,9 @@ export class InlineThreadManager {
         await new Promise((resolve) => setTimeout(resolve, 50)); ready = this.siteAdapter.canSubmitComposer();
       }
       if (!ready) throw new Error('发送按钮当前不可用');
-      const record = await this.webBridge.reservePromptSubmission(id, pending.promptHash ?? '', window.location.href);
+      const record = await this.webBridge.reservePromptSubmission(pending.id, pending.promptHash ?? '', window.location.href);
       if (!this.siteAdapter.submitComposer()) {
-        await this.webBridge.releasePromptSubmission(id, pending.promptHash ?? '').catch(() => undefined);
+        await this.webBridge.releasePromptSubmission(pending.id, pending.promptHash ?? '').catch(() => undefined);
         throw new Error('发送失败，请重试');
       }
       this.pendingThreads.restore(record.pendingThread); item.thread = record.localThread;
@@ -413,7 +414,7 @@ export class InlineThreadManager {
     if (!item || !pending || !this.webBridge) return false;
     try {
       await this.webBridge.savePendingThread(pending, item.thread);
-      const record = await this.webBridge.prepareManualBranch(id);
+      const record = await this.webBridge.prepareManualBranch(pending.id);
       item.thread = record.localThread;
       item.manualBranch = true;
       void this.metrics?.increment('targetsAssociated');
@@ -432,7 +433,7 @@ export class InlineThreadManager {
     item.thread = { ...item.thread, status: item.thread.messages.at(-1)?.role === 'assistant' ? 'answer_attached' : 'failed', updatedAt: this.now().toISOString() };
     this.viewAnchors.get(id)?.stop(); this.viewAnchors.delete(id);
     void Promise.all([this.threadStore?.upsert(item.thread), pending && this.pendingStore?.upsert(pending)]);
-    void this.webBridge?.cancel(id).catch(() => undefined); this.render(id);
+    void this.webBridge?.cancel(this.pendingThreads.get(id)?.id ?? id).catch(() => undefined); this.render(id);
   }
 
   delete(id: string): void {
@@ -447,7 +448,7 @@ export class InlineThreadManager {
     }
     this.pendingThreads.delete(id);
     const removePersisted = () => Promise.all([this.threadStore?.delete(id), this.pendingStore?.delete(id), this.metrics?.increment('threadsDeleted')]);
-    if (this.webBridge && item.thread.status !== 'draft') void this.webBridge.cancel(id).then(removePersisted, removePersisted);
+    if (this.webBridge && item.thread.status !== 'draft') void this.webBridge.cancel(this.pendingThreads.get(id)?.id ?? id).then(removePersisted, removePersisted);
     else void removePersisted();
     item.root.unmount();
     this.viewAnchors.get(id)?.stop(); this.viewAnchors.delete(id);
@@ -458,7 +459,8 @@ export class InlineThreadManager {
   }
 
   handleAssociationUpdate(record: PendingAssociation): void {
-    const item = this.mounted.get(record.pendingThread.id);
+    const threadId = record.pendingThread.threadId || record.pendingThread.id;
+    const item = this.mounted.get(threadId);
     if (!item) return;
     if (record.associationStatus === 'cancelled') {
       this.pendingThreads.delete(record.pendingThread.id);
@@ -501,7 +503,7 @@ export class InlineThreadManager {
     void this.threadStore?.upsert(item.thread);
     if (!wasAttached && item.thread.status === 'answer_attached') void this.metrics?.increment('answersAttached');
     if (item.thread.status === 'answer_attached') { this.viewAnchors.get(item.thread.id)?.stop(); this.viewAnchors.delete(item.thread.id); }
-    this.render(record.pendingThread.id);
+    this.render(threadId);
   }
 
   setContinueHandler(handler: (id: string, thread: LocalThread, anchorElement: HTMLElement) => void): void {
@@ -539,8 +541,6 @@ export class InlineThreadManager {
       displayId: item.thread.displayId,
       contextVersion: workspace?.contextState.contextVersion,
     });
-    const pending = this.pendingThreads.prepareNext(id, trimmedQuestion, generatedPrompt, 'compact', this.siteAdapter?.getAssistantMessageFingerprints());
-    if (!pending) return false;
     const timestamp = this.now().toISOString();
     const questionMessage: LocalMessage = {
       id: createMessageId(this.now()),
@@ -549,6 +549,8 @@ export class InlineThreadManager {
       attachedManually: false,
       createdAt: timestamp,
     };
+    const pending = this.pendingThreads.prepareNext(id, trimmedQuestion, generatedPrompt, 'compact', this.siteAdapter?.getAssistantMessageFingerprints(), questionMessage.id);
+    if (!pending) return false;
     item.thread = {
       ...item.thread,
       messages: [...item.thread.messages, questionMessage],
@@ -560,7 +562,11 @@ export class InlineThreadManager {
     this.render(id);
     if (!this.webBridge) return true;
     try {
-      await this.webBridge.updateLocalThread(pending, item.thread);
+      const created = await this.webBridge.savePendingThread(pending, item.thread);
+      this.pendingThreads.restore(created.pendingThread);
+      item.thread = created.localThread;
+      await this.pendingStore?.replaceForThread(pending);
+      await this.threadStore?.upsert(item.thread);
       this.render(id);
       return this.confirmAnswerModeAndSend(id);
     } catch (error) {
@@ -609,7 +615,7 @@ export class InlineThreadManager {
     const item = this.mounted.get(id);
     if (!item || !this.webBridge) return false;
     try {
-      const record = await this.webBridge.unlinkTargetPage(id);
+      const record = await this.webBridge.unlinkTargetPage(this.pendingThreads.get(id)?.id ?? id);
       item.thread = record.localThread;
       if (item.thread.answerMode === 'workspace' && item.thread.workspaceId && this.workspaceStore) {
         const workspace = await this.workspaceStore.get(item.thread.workspaceId);
@@ -726,8 +732,9 @@ export class InlineThreadManager {
         onCancel={() => this.cancel(id)}
         onOpenAnswer={() => {
           if (!this.webBridge) return;
-          if (item.thread.answerMode === 'current_conversation') void this.webBridge.returnToSource(id).catch(() => undefined);
-          else void this.webBridge.openAnswerPage(id).catch(() => undefined);
+          const pendingId = this.pendingThreads.get(id)?.id ?? id;
+          if (item.thread.answerMode === 'current_conversation') void this.webBridge.returnToSource(pendingId).catch(() => undefined);
+          else void this.webBridge.openAnswerPage(pendingId).catch(() => undefined);
         }}
         onContinue={() => this.continueHandler?.(id, item.thread, item.anchorElement)}
         onDeleteRound={(messageId) => void this.deleteRound(id, messageId)}
@@ -738,7 +745,7 @@ export class InlineThreadManager {
           item.error = error instanceof Error ? error.message : '已打开原会话，但未能精确定位原回答';
           this.render(id);
         })}
-        onUndoAttachment={() => void this.webBridge?.undoAttachment(id).then((record) => this.handleAssociationUpdate(record)).catch((error: unknown) => {
+        onUndoAttachment={() => void this.webBridge?.undoAttachment(this.pendingThreads.get(id)?.id ?? id).then((record) => this.handleAssociationUpdate(record)).catch((error: unknown) => {
           item.error = error instanceof Error ? error.message : '撤销附加失败'; this.render(id);
         })}
         onGoCandidate={() => {

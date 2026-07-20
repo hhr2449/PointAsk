@@ -106,6 +106,17 @@ export class WebConversationBridge {
     this.runtime.onMessage?.addListener(listener);
     return () => this.runtime.onMessage?.removeListener(listener);
   }
+  onThreadReturnProbe(callback: (threadId: string) => boolean): () => void {
+    const listener = (message: unknown, _sender?: unknown, sendResponse?: (response: unknown) => void) => {
+      if (!message || typeof message !== 'object') return false;
+      const value = message as { type?: unknown; threadId?: unknown };
+      if (value.type !== 'pointask:probe-thread-return' || typeof value.threadId !== 'string') return false;
+      sendResponse?.({ ready: callback(value.threadId) });
+      return true;
+    };
+    this.runtime.onMessage?.addListener(listener);
+    return () => this.runtime.onMessage?.removeListener(listener);
+  }
   async completeNavigation(navigationId: string): Promise<void> {
     await this.send({ type: 'pointask:complete-navigation', navigationId });
   }

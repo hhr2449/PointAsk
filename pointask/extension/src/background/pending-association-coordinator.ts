@@ -260,6 +260,17 @@ export class PendingAssociationCoordinator {
     return this.records.get(id) ?? null;
   }
 
+  findByThreadId(threadId: string): PendingAssociation | null {
+    this.removeExpired();
+    return [...this.records.values()].filter((record) => record.localThread.id === threadId)
+      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0] ?? null;
+  }
+
+  retireForContinuation(id: string): PendingAssociation | null {
+    const record = this.get(id);
+    return record ? this.update(id, { associationStatus: 'completed' }) : null;
+  }
+
   forPage(tabId: number): PendingAssociation[] {
     this.removeExpired();
     return [...this.records.values()].filter((record) =>
@@ -317,7 +328,7 @@ export class PendingAssociationCoordinator {
 
   private createLocalThread(pendingThread: PendingThread, timestamp: string): LocalThread {
     return {
-      id: pendingThread.id,
+      id: pendingThread.threadId || pendingThread.id,
       displayId: pendingThread.displayId,
       answerMode: pendingThread.answerMode,
       workspaceId: pendingThread.workspaceId,

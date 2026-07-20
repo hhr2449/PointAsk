@@ -81,10 +81,13 @@ describe('multi-turn prompt and thread flow', () => {
 
     expect(manager.getThread('pointask-multi')?.messages.map((message) => message.content[0]?.type === 'text' ? message.content[0].content : ''))
       .toEqual(['第一问', '第一答', '第二问']);
-    const update = sent.find((message) => message.type === 'pointask:update-local-thread');
+    const update = sent.find((message) => message.type === 'pointask:create-pending-thread' &&
+      'pendingThread' in message && message.pendingThread.threadId === 'pointask-multi');
     expect(update && 'pendingThread' in update ? update.pendingThread.generatedPrompt : '').toContain('用户：第一问');
     expect(update && 'pendingThread' in update ? update.pendingThread.generatedPrompt : '').toContain('局部回答：第一答');
     expect(update && 'pendingThread' in update ? update.pendingThread.generatedPrompt : '').toContain('我的问题：\n第二问');
+    expect(update && 'pendingThread' in update ? update.pendingThread.id : '').not.toBe('pointask-multi');
+    expect(update && 'pendingThread' in update ? update.pendingThread.roundId : '').toBeTruthy();
     expect(writeText).not.toHaveBeenCalled();
     expect(sent.some((message) => message.type === 'pointask:open-answer-page')).toBe(true);
     expect(sent.some((message) => message.type === 'pointask:reserve-prompt-submission')).toBe(false);

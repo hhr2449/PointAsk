@@ -23,6 +23,13 @@ export class PendingStore {
       return threads.length !== current.length;
     });
   }
+  async replaceForThread(thread: PendingThread): Promise<void> {
+    await withStorageLock('pending-threads', async () => {
+      const threadId = thread.threadId || thread.id;
+      const threads = [...(await this.list()).filter((item) => (item.threadId || item.id) !== threadId), thread];
+      await this.driver.set({ [STORAGE_KEYS.pendingThreads]: threads, [STORAGE_KEYS.schemaVersion]: STORAGE_SCHEMA_VERSION });
+    });
+  }
   async deleteExpired(expiryHours: number, now = new Date()): Promise<number> {
     return withStorageLock('pending-threads', async () => {
       const current = await this.list(); const cutoff = now.getTime() - expiryHours * 60 * 60 * 1_000;
