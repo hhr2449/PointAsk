@@ -99,7 +99,7 @@ describe('rich ChatGPT content', () => {
     expect(richContentStyles).toContain('.pointask-rich-content :is(strong, b) span');
     expect(threadStyles).toContain('.pointask-message > strong { font-size: 12px; }');
     expect(threadStyles).toContain('.pointask-selection > strong { font-size: 12px; }');
-    expect(threadStyles).toContain('.pointask-round-question { padding: 10px 11px; border-radius: 10px; background: var(--pa-bg-subtle); }');
+    expect(threadStyles).toContain('.pointask-round-question { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0;');
     expect(threadStyles).toContain('.pointask-round-answer-label::before { content: "◦";');
     expect(threadStyles).not.toContain('.pointask-message strong { font-size: 12px; }');
     expect(threadStyles).not.toContain('.pointask-selection strong { font-size: 12px; }');
@@ -337,7 +337,9 @@ describe('view anchor and migration', () => {
         capturedAt: '2026-01-01T00:01:00.000Z', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:01:00.000Z' }],
       status: 'answer_ready', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:01:00.000Z' };
     const first = migrateStorage({ [STORAGE_KEYS.threads]: [base] });
-    expect(first.threads[0]?.rounds?.[0]).toMatchObject({ persistenceStatus: 'staged', stagedAnswer: [{ type: 'text', content: '暂存回答' }] });
+    expect(first.threads[0]?.rounds?.[0]).toMatchObject({ questionMessageId: 'q1', persistenceStatus: 'staged',
+      stagedAnswer: [{ type: 'text', content: '暂存回答' }] });
+    expect(first.threads[0]?.messages[0]).toMatchObject({ id: 'q1', roundId: 'q1' });
     expect(migrateStorage({ [STORAGE_KEYS.threads]: first.threads })).toEqual(first);
   });
 
@@ -361,5 +363,7 @@ describe('view anchor and migration', () => {
     const migrated = migrateStorage({ [STORAGE_KEYS.threads]: [thread], [STORAGE_KEYS.pendingThreads]: [pending],
       [STORAGE_KEYS.schemaVersion]: 8 });
     expect(migrated.pendingThreads[0]?.roundId).toBe('q2');
+    expect(migrated.threads[0]?.rounds?.at(-1)).toMatchObject({ id: 'q2', questionMessageId: 'q2', pendingId: 'legacy-pending',
+      status: 'answer_ready' });
   });
 });

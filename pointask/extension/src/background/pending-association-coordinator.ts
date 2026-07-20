@@ -2,7 +2,7 @@ import type { PendingThread } from '../bridge/pending-thread-manager';
 import { isCompatibleChatGptTargetUrl, type AttachedRoundPayload, type PendingAssociation } from '../bridge/runtime-messages';
 import type { AnswerSourceLocator, LocalMessage, LocalThread, RichContentBlock } from '../shared/local-thread';
 import { richPlainText, textBlocks } from '../shared/rich-content';
-import { answerForRound, insertRoundAnswer, pendingStatus, syncPendingRound, threadRounds } from '../shared/thread-rounds';
+import { answerForRound, insertRoundAnswer, pendingStatus, questionForRound, roundIdForPending, syncPendingRound, threadRounds } from '../shared/thread-rounds';
 
 export const PENDING_EXPIRY_MS = 24 * 60 * 60 * 1_000;
 
@@ -166,6 +166,7 @@ export class PendingAssociationCoordinator {
     if (replacing !== replace) return null;
     const existingAnswerIndex = replacing ? record.localThread.messages.length - 1 : -1;
     const timestamp = this.now().toISOString();
+    const roundId = roundIdForPending(record.localThread, record.pendingThread);
     const answer: LocalMessage = {
       id: existingAnswerIndex >= 0
         ? record.localThread.messages[existingAnswerIndex]!.id
@@ -173,7 +174,7 @@ export class PendingAssociationCoordinator {
       role: 'assistant',
       content: typeof selected === 'string' ? textBlocks(selected.trim()) : selected,
       answerSource,
-      roundId: record.pendingThread.roundId,
+      roundId,
       attachedAt: timestamp,
       attachedManually: true,
       createdAt: timestamp,
@@ -181,9 +182,9 @@ export class PendingAssociationCoordinator {
     const messages = [...record.localThread.messages];
     if (existingAnswerIndex >= 0) messages[existingAnswerIndex] = answer;
     else messages.push(answer);
-    const roundId = record.pendingThread.roundId;
-    const rounds = threadRounds(record.localThread, record.pendingThread).map((round) => round.id === roundId ? {
+    const rounds = threadRounds(record.localThread).map((round) => round.id === roundId ? {
       ...round, status: 'attached' as const, persistenceStatus: 'attached' as const, stagedAnswer: undefined,
+      answerMessageId: answer.id,
       attachedAt: timestamp, answerSource,
       candidateAnswerFingerprint: answerSource?.messageFingerprint, updatedAt: timestamp,
     } : round);
@@ -213,7 +214,7 @@ export class PendingAssociationCoordinator {
       const round = localThread.rounds?.find((item) => item.id === payload.roundId);
       if (!round) return null;
       if (round.persistenceStatus === 'attached' || answerForRound(localThread, payload.roundId)) continue;
-      const question = localThread.messages.find((message) => message.role === 'user' && message.id === payload.roundId);
+      const question = questionForRound(localThread, payload.roundId);
       const stagedMatches = round.persistenceStatus === 'staged' && round.stagedAnswer &&
         JSON.stringify(round.stagedAnswer) === JSON.stringify(payload.richContent);
       const explicitSelection = Boolean(payload.answerSource.selectedText);
@@ -231,12 +232,13 @@ export class PendingAssociationCoordinator {
       localThread = insertRoundAnswer(localThread, payload.roundId, answer);
       localThread.rounds = localThread.rounds?.map((item) => item.id === payload.roundId ? {
         ...item, status: 'attached' as const, persistenceStatus: 'attached' as const, stagedAnswer: undefined,
+        answerMessageId: answer.id,
         attachedAt: timestamp, answerSource: payload.answerSource,
         candidateAnswerFingerprint: payload.answerSource.messageFingerprint, updatedAt: timestamp,
       } : item);
       attached++;
     }
-    const currentRoundId = record.pendingThread.roundId ?? localThread.rounds?.at(-1)?.id;
+    const currentRoundId = roundIdForPending(localThread, record.pendingThread);
     const currentAttached = Boolean(currentRoundId && localThread.rounds?.find((round) => round.id === currentRoundId)?.status === 'attached');
     if (!attached) return record;
     return this.update(id, {
@@ -251,13 +253,12 @@ export class PendingAssociationCoordinator {
   stageRoundAnswer(id: string, targetTabId: number, roundId: string, promptHash: string, targetUrl: string,
     captureFailed: boolean, richContent?: RichContentBlock[], answerSource?: AnswerSourceLocator): PendingAssociation | null {
     const record = this.get(id);
-    const rounds = record ? threadRounds(record.localThread, record.pendingThread) : [];
-    const activeRoundId = record?.pendingThread.roundId ?? rounds.at(-1)?.id;
+    const rounds = record ? threadRounds(record.localThread) : [];
     if (!record || record.targetTabId !== targetTabId || record.associationStatus === 'cancelled' ||
-      record.pendingThread.id !== id || activeRoundId !== roundId || record.pendingThread.promptHash !== promptHash ||
+      record.pendingThread.id !== id ||
       !record.targetConversationUrl || !isCompatibleChatGptTargetUrl(record.targetConversationUrl, targetUrl)) return null;
     const current = rounds.find((round) => round.id === roundId);
-    if (!current || current.pendingId !== id || current.promptHash !== promptHash || current.persistenceStatus === 'attached') return null;
+    if (!current || current.promptHash !== promptHash || current.persistenceStatus === 'attached') return null;
     if (current.persistenceStatus === 'staged' && !captureFailed) return record;
     const timestamp = this.now().toISOString();
     if (!captureFailed && (current.status !== 'answer_ready' || !richContent?.length || !answerSource)) return null;
@@ -284,11 +285,24 @@ export class PendingAssociationCoordinator {
   markCandidate(id: string, senderTabId: number, fingerprint: string, streaming: boolean): PendingAssociation | null {
     const record = this.get(id);
     if (!record || record.targetTabId !== senderTabId || record.associationStatus === 'cancelled') return null;
-    const status = streaming ? 'generating' : 'answer_ready';
+    const status: PendingThread['status'] = streaming ? 'generating' : 'answer_ready';
+    const timestamp = this.now().toISOString();
+    const pending = { ...record.pendingThread, candidateAnswerFingerprint: fingerprint, status, updatedAt: timestamp };
+    let localThread = syncPendingRound({ ...record.localThread, status, updatedAt: timestamp }, pending, pendingStatus(status));
+    const roundId = pending.roundId;
+    if (roundId && record.targetConversationUrl) {
+      const answerSource: AnswerSourceLocator = {
+        conversationUrl: record.targetConversationUrl,
+        conversationKey: pending.targetConversationKey ?? record.targetConversationUrl,
+        messageFingerprint: fingerprint,
+      };
+      localThread = { ...localThread, rounds: threadRounds(localThread).map((round) => round.id === roundId ? {
+        ...round, answerSource, candidateAnswerFingerprint: fingerprint, status: pendingStatus(status), updatedAt: timestamp,
+      } : round) };
+    }
     return this.update(id, {
-      pendingThread: { ...record.pendingThread, candidateAnswerFingerprint: fingerprint, status, updatedAt: this.now().toISOString() },
-      localThread: syncPendingRound({ ...record.localThread, status, updatedAt: this.now().toISOString() },
-        { ...record.pendingThread, candidateAnswerFingerprint: fingerprint, status, updatedAt: this.now().toISOString() }, pendingStatus(status)),
+      pendingThread: pending,
+      localThread,
     });
   }
 
@@ -411,6 +425,7 @@ export class PendingAssociationCoordinator {
   }
 
   private createLocalThread(pendingThread: PendingThread, timestamp: string): LocalThread {
+    const questionMessageId = `pointask-message-${pendingThread.id}`;
     return {
       id: pendingThread.threadId || pendingThread.id,
       displayId: pendingThread.displayId,
@@ -423,14 +438,15 @@ export class PendingAssociationCoordinator {
       sourceMessageFingerprint: pendingThread.sourceMessageFingerprint,
       targetConversationUrl: pendingThread.targetConversationUrl,
       messages: [{
-        id: `pointask-question-${pendingThread.id}`,
+        id: questionMessageId,
+        roundId: pendingThread.roundId,
         role: 'user',
         content: textBlocks(pendingThread.question),
         attachedManually: false,
         createdAt: timestamp,
       }],
       rounds: pendingThread.roundId ? [{
-        id: pendingThread.roundId, pendingId: pendingThread.id, promptHash: pendingThread.promptHash || `pointask-prompt-${pendingThread.id}`,
+        id: pendingThread.roundId, questionMessageId, pendingId: pendingThread.id, promptHash: pendingThread.promptHash || `pointask-prompt-${pendingThread.id}`,
         assistantFingerprintsBefore: pendingThread.assistantFingerprintsBefore ?? [], status: pendingStatus(pendingThread.status),
         persistenceStatus: 'not_captured',
         createdAt: timestamp, updatedAt: timestamp,

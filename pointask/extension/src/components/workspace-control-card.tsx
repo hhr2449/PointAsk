@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { PendingAssociation } from '../bridge/runtime-messages';
 import { ContinueQuestionView } from './continue-question-view';
 import { RoundSelectionView, type SelectableRound } from './round-selection-view';
@@ -25,19 +25,27 @@ export function WorkspaceControlCard({ record, records, rounds, state, expanded,
   const [captureFailed, setCaptureFailed] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(() => defaultSelectedRoundIds(rounds));
+  const previousPersistence = useRef(new Map(rounds.map((round) => [round.id, round.persistenceStatus])));
   useEffect(() => {
     setView('status');
     setSelected(new Set());
     setQuestion('');
     setContinueError(undefined);
     setCaptureFailed(false);
+    previousPersistence.current = new Map();
   }, [record.localThread.id]);
   useEffect(() => {
     if (view !== 'rounds') return;
     setSelected((current) => {
       const next = validSelectedRoundIds(rounds, current);
+      // A round that became staged while this panel was open is selected by
+      // default. Existing user choices are preserved; only newly eligible IDs
+      // are added and newly invalid IDs are removed.
+      for (const round of rounds) if (round.persistenceStatus === 'staged' &&
+        previousPersistence.current.get(round.id) !== 'staged' && isSelectableRound(round)) next.add(round.id);
       return next.size === current.size && [...next].every((id) => current.has(id)) ? current : next;
     });
+    previousPersistence.current = new Map(rounds.map((round) => [round.id, round.persistenceStatus]));
   }, [rounds, view]);
   const validSelected = validSelectedRoundIds(rounds, selected);
 
@@ -69,7 +77,11 @@ export function WorkspaceControlCard({ record, records, rounds, state, expanded,
             .then((ok) => { if (ok) setView('status'); })} />
           : <WorkspaceStatusView source={record.pendingThread.anchor.selectedText} question={record.pendingThread.question} roundNumber={rounds.length} state={state}
             selectionSummary={selectionSummary} canChooseRounds={rounds.some((round) => !round.attached)} busy={busy} error={error} onPrimary={onPrimary}
-            onContinue={() => setView('continue')} onChooseRounds={() => { setSelected(defaultSelectedRoundIds(rounds)); setView('rounds'); }}
+            onContinue={() => setView('continue')} onChooseRounds={() => {
+              const defaults = defaultSelectedRoundIds(rounds);
+              previousPersistence.current = new Map(rounds.map((round) => [round.id, round.persistenceStatus]));
+              setSelected(defaults); setView('rounds');
+            }}
             onClearSelection={onClearSelection} onReturn={onReturn} onMore={() => setMenuOpen((open) => !open)} />}
       {menuOpen && <div className="pointask-control-menu" role="menu">
         <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); onAttachOnly(); }}>仅附加，不返回</button>

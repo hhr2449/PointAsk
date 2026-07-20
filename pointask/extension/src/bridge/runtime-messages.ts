@@ -324,9 +324,11 @@ export function isLocalThread(value: unknown): value is LocalThread {
   if (value.expanded !== undefined && typeof value.expanded !== 'boolean') return false;
   if (value.collapsedRoundIds !== undefined && (!Array.isArray(value.collapsedRoundIds) || !value.collapsedRoundIds.every(isNonEmptyString))) return false;
   if (value.rounds !== undefined && (!Array.isArray(value.rounds) || !value.rounds.every((raw) => {
-    if (!isRecord(raw) || !hasOnlyKeys(raw, ['id', 'pendingId', 'promptHash', 'assistantFingerprintsBefore', 'candidateAnswerFingerprint',
+    if (!isRecord(raw) || !hasOnlyKeys(raw, ['id', 'questionMessageId', 'answerMessageId', 'pendingId', 'promptHash', 'assistantFingerprintsBefore', 'candidateAnswerFingerprint',
       'status', 'persistenceStatus', 'stagedAnswer', 'capturedAt', 'attachedAt', 'answerSource', 'createdAt', 'updatedAt'])) return false;
     return ['id', 'pendingId', 'promptHash', 'createdAt', 'updatedAt'].every((key) => isNonEmptyString(raw[key])) &&
+      (raw.questionMessageId === undefined || isNonEmptyString(raw.questionMessageId)) &&
+      (raw.answerMessageId === undefined || isNonEmptyString(raw.answerMessageId)) &&
       Array.isArray(raw.assistantFingerprintsBefore) && raw.assistantFingerprintsBefore.every(isNonEmptyString) &&
       ['waiting_for_submission', 'waiting_for_answer', 'generating', 'answer_ready', 'failed', 'attached'].includes(String(raw.status)) &&
       ['not_captured', 'staged', 'attaching', 'attached', 'capture_failed'].includes(String(raw.persistenceStatus)) &&
@@ -365,6 +367,23 @@ export function isLocalThread(value: unknown): value is LocalThread {
       const roundId = typeof message.roundId === 'string' ? message.roundId : latestUserId;
       if (!roundId || answeredRoundIds.has(roundId)) return false;
       answeredRoundIds.add(roundId);
+    }
+  }
+  if (value.rounds) {
+    const roundIds = new Set<string>();
+    for (const raw of value.rounds) {
+      const round = raw as Record<string, unknown>;
+      const roundId = round.id as string;
+      if (roundIds.has(roundId)) return false;
+      roundIds.add(roundId);
+      if (typeof round.questionMessageId === 'string') {
+        const question = value.messages.find((message) => message.id === round.questionMessageId);
+        if (!question || question.role !== 'user' || question.roundId !== undefined && question.roundId !== roundId) return false;
+      }
+      if (typeof round.answerMessageId === 'string') {
+        const answer = value.messages.find((message) => message.id === round.answerMessageId);
+        if (!answer || answer.role !== 'assistant' || answer.roundId !== roundId) return false;
+      }
     }
   }
   return value.messages.length > 0;

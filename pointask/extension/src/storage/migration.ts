@@ -5,6 +5,7 @@ import { normalizeRichBlocks } from '../shared/rich-content';
 import { DEFAULT_SETTINGS, STORAGE_KEYS, STORAGE_SCHEMA_VERSION, type PointAskSettings, type PointAskStorageSchema } from './storage-schema';
 import { withStorageLock, type StorageDriver } from './storage-driver';
 import { stableTextHash } from '../shared/text-utils';
+import { syncPendingRound } from '../shared/thread-rounds';
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' ? value as Record<string, unknown> : null;
@@ -52,15 +53,24 @@ export function migrateStorage(raw: Record<string, unknown>): PointAskStorageSch
       const stagedAnswer = normalizeRichBlocks(round.stagedAnswer);
       const persistenceStatus = ['not_captured', 'staged', 'attaching', 'attached', 'capture_failed'].includes(String(round.persistenceStatus))
         ? round.persistenceStatus : round.status === 'attached' ? 'attached' : 'not_captured';
+      const answerMessage = messages.find((message) => message && typeof message === 'object' && message.role === 'assistant' && message.roundId === round.id);
+      const answerMessageId = typeof round.answerMessageId === 'string' ? round.answerMessageId
+        : answerMessage && typeof answerMessage.id === 'string' ? answerMessage.id : undefined;
       return {
         ...round,
+        questionMessageId: typeof round.questionMessageId === 'string' ? round.questionMessageId : String(round.id ?? ''),
+        ...(answerMessageId ? { answerMessageId } : {}),
         persistenceStatus,
         ...(persistenceStatus === 'staged' && stagedAnswer ? { stagedAnswer } : { stagedAnswer: undefined }),
       };
     });
+    const roundByQuestion = new Map(rounds.map((round) => [String(round.questionMessageId), String((round as Record<string, unknown>).id)]));
+    const migratedMessages = messages.map((message) => message && typeof message === 'object' && message.role === 'user'
+      ? { ...message, roundId: message.roundId ?? roundByQuestion.get(String(message.id)) }
+      : message);
     return {
       ...item,
-      messages,
+      messages: migratedMessages,
       ...(rounds.length ? { rounds } : {}),
       displayId,
       answerMode: item.answerMode === 'workspace' || item.answerMode === 'current_conversation'
@@ -78,7 +88,7 @@ export function migrateStorage(raw: Record<string, unknown>): PointAskStorageSch
         ? item.roundId
         : thread.rounds?.find((round) => round.pendingId === item.id)?.id
           ?? thread.rounds?.at(-1)?.id
-          ?? [...thread.messages].reverse().find((message) => message.role === 'user')?.id;
+          ?? (() => { const message = [...thread.messages].reverse().find((entry) => entry.role === 'user'); return message?.roundId ?? message?.id; })();
       return {
         ...item,
         displayId: item.displayId ?? thread.displayId,
@@ -90,6 +100,14 @@ export function migrateStorage(raw: Record<string, unknown>): PointAskStorageSch
         assistantFingerprintsBefore: Array.isArray(item.assistantFingerprintsBefore) ? item.assistantFingerprintsBefore : [],
       };
     }).filter(isPendingThread) as unknown as PendingThread[];
+  // Persist the transport state into its explicitly addressed round once at
+  // migration time. From this point onward LocalThreadRound is the UI source
+  // of truth and PendingThread is not overlaid by readers.
+  const synchronizedThreads = threads.map((thread) => {
+    const pending = pendingThreads.filter((item) => (item.threadId || item.id) === thread.id)
+      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))[0];
+    return pending ? syncPendingRound(thread, pending) : thread;
+  });
   const rawWorkspaces: unknown[] = Array.isArray(raw[STORAGE_KEYS.workspaces]) ? raw[STORAGE_KEYS.workspaces] as unknown[] : [];
   const workspaces = rawWorkspaces.filter((value): value is PointAskWorkspace => {
     const item = record(value);
@@ -130,7 +148,7 @@ export function migrateStorage(raw: Record<string, unknown>): PointAskStorageSch
     closeDedicatedTabAfterAttach: rawSettings?.closeDedicatedTabAfterAttach === true,
     autoActionAuthorized: rawSettings?.autoActionAuthorized === true,
   };
-  return { version: STORAGE_SCHEMA_VERSION, threads, pendingThreads, workspaces, settings };
+  return { version: STORAGE_SCHEMA_VERSION, threads: synchronizedThreads, pendingThreads, workspaces, settings };
 }
 
 export async function runStorageMigration(driver: StorageDriver): Promise<PointAskStorageSchema> {

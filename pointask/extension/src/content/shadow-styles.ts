@@ -39,12 +39,12 @@ export const composerStyles = `${sharedShadowStyles}
 `;
 
 export const threadStyles = `${sharedShadowStyles}
-  :host { display: block; width: 100%; margin: 10px 0; overflow-anchor: none; }
+  :host { display: block; box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; margin: 10px 0; overflow-anchor: none; }
   :host(.pointask-thread-highlight) pointask-thread-card { outline: 3px solid #10a37f; outline-offset: 3px; transition: outline-color .25s ease; }
-  pointask-thread-card { display: block; width: min(680px, 100%); margin-inline: auto; border: 1px solid var(--pa-border); border-radius: var(--pa-radius); color: var(--pa-text); background: color-mix(in srgb, var(--pa-bg) 96%, transparent); }
+  pointask-thread-card { display: block; box-sizing: border-box; width: 100%; max-width: 680px; min-width: 0; margin-inline: auto; border: 1px solid var(--pa-border); border-radius: var(--pa-radius); color: var(--pa-text); background: color-mix(in srgb, var(--pa-bg) 96%, transparent); overflow-wrap: anywhere; }
   .pointask-thread-header { display: flex; align-items: stretch; min-width: 0; }
-  .pointask-header-actions { display: flex; align-items: center; gap: 3px; padding-right: 5px; }
-  .pointask-quick { border: 0; border-radius: 7px; padding: 6px 9px; background: transparent; white-space: nowrap; font-size: 13px; line-height: 1.2; }
+  .pointask-header-actions { display: flex; min-width: 0; align-items: center; gap: 3px; padding-right: 5px; }
+  .pointask-quick { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; border: 0; border-radius: 7px; padding: 6px 9px; background: transparent; white-space: nowrap; font-size: 13px; line-height: 1.2; }
   .pointask-quick:hover { background: var(--pa-hover); }
   .pointask-primary-action { color: var(--pa-text); font-weight: 600; }
   .pointask-more-trigger { border: 0; border-radius: 7px; padding: 5px 8px; background: transparent; font-weight: 700; user-select: none; -webkit-user-select: none; font-size: 13px; line-height: 1.2; }
@@ -58,13 +58,13 @@ export const threadStyles = `${sharedShadowStyles}
   .pointask-status-dot { display: inline-block; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--pa-muted); }
   .pointask-status-answer_attached, .pointask-status-answer_ready { background: var(--pa-accent); }
   .pointask-status-failed, .pointask-status-orphaned { background: var(--pa-danger); }
-  .pointask-thread-body { padding: 8px 13px 12px; border-top: 1px solid var(--pa-border); }
+  .pointask-thread-body { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; padding: 8px 13px 12px; border-top: 1px solid var(--pa-border); overflow-wrap: anywhere; }
   .pointask-status { margin: 9px 0; color: var(--pa-muted); font-size: 12px; }
   .pointask-status-line { display: inline-flex; align-items: center; gap: 6px; margin-top: 3px; }
   .pointask-error { color: var(--pa-danger); }
   .pointask-error-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
-  .pointask-round-list { display: grid; gap: 10px; margin: 10px 0 0; }
-  .pointask-round { overflow: clip; border: 1px solid var(--pa-border); border-radius: 12px; background: color-mix(in srgb, var(--pa-bg) 97%, var(--pa-bg-subtle)); }
+  .pointask-round-list { display: grid; width: 100%; max-width: 100%; min-width: 0; gap: 10px; margin: 10px 0 0; }
+  .pointask-round { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; overflow: clip; border: 1px solid var(--pa-border); border-radius: 12px; background: color-mix(in srgb, var(--pa-bg) 97%, var(--pa-bg-subtle)); overflow-wrap: anywhere; }
   .pointask-round-header { display: flex; align-items: center; gap: 4px; min-width: 0; min-height: 42px; }
   .pointask-round-toggle { display: flex; flex: 1; min-width: 0; align-items: center; gap: 8px; padding: 10px 11px; text-align: left; color: inherit; }
   .pointask-round-toggle:hover { background: var(--pa-hover); }
@@ -73,20 +73,23 @@ export const threadStyles = `${sharedShadowStyles}
   .pointask-round-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--pa-text); font-size: 14px; line-height: 1.35; font-weight: 600; }
   .pointask-round-chevron { flex: none; color: var(--pa-muted); font-size: 13px; line-height: 1; }
   .pointask-round-menu { padding: 7px 8px 7px 0; }
-  .pointask-round-body { display: grid; gap: 10px; padding: 0 11px 11px; }
-  .pointask-round-question { padding: 10px 11px; border-radius: 10px; background: var(--pa-bg-subtle); }
-  .pointask-round-question-content { color: var(--pa-text); font-size: 16px; line-height: 1.55; font-weight: 550; overflow-wrap: anywhere; }
-  .pointask-round-answer { padding-left: 12px; border-left: 2px solid color-mix(in srgb, var(--pa-accent) 72%, var(--pa-border)); }
+  .pointask-round-body { display: grid; width: 100%; max-width: 100%; min-width: 0; gap: 10px; padding: 0 11px 11px; }
+  .pointask-round-question { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; padding: 10px 11px; border-radius: 10px; background: var(--pa-bg-subtle); overflow-wrap: anywhere; }
+  .pointask-round-question-content { width: 100%; max-width: 100%; min-width: 0; color: var(--pa-text); font-size: 16px; line-height: 1.55; font-weight: 550; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .pointask-question-text-collapsed { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+  .pointask-question-text-expanded { display: block; max-height: min(240px, 32vh); overflow-y: auto; overscroll-behavior: contain; }
+  .pointask-question-toggle { margin-top: 5px; border-radius: 6px; padding: 3px 5px; color: var(--pa-muted); font-size: 12px; text-decoration: underline; }
+  .pointask-question-toggle:hover { background: var(--pa-hover); color: var(--pa-text); }
+  .pointask-round-answer { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; padding-left: 12px; border-left: 2px solid color-mix(in srgb, var(--pa-accent) 72%, var(--pa-border)); overflow-wrap: anywhere; }
   .pointask-round-answer-label { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; color: var(--pa-text); font-size: 15px; line-height: 1.35; font-weight: 600; }
   .pointask-round-answer-label::before { content: "◦"; color: var(--pa-muted); font-size: 14px; line-height: 1; }
-  .pointask-round-meta { margin: -2px 0 6px; color: var(--pa-muted); font-size: 11px; overflow-wrap: anywhere; }
-  .pointask-round-answer-content { color: var(--pa-text); font-size: 16px; line-height: 1.65; }
+  .pointask-round-answer-content { width: 100%; max-width: 100%; min-width: 0; color: var(--pa-text); font-size: 16px; line-height: 1.65; overflow-wrap: anywhere; }
   .pointask-round-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .pointask-round-secondary { border-color: var(--pa-border); padding: 6px 9px; color: var(--pa-muted); background: transparent; }
   .pointask-round-secondary:hover { background: var(--pa-hover); }
-  .pointask-selection { margin: 10px 0; padding: 8px 10px; border-left: 2px solid var(--pa-border); color: var(--pa-muted); }
+  .pointask-selection { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; margin: 10px 0; padding: 8px 10px; border-left: 2px solid var(--pa-border); color: var(--pa-muted); overflow-wrap: anywhere; }
   .pointask-selection > strong { font-size: 12px; }
-  .pointask-selection-content { margin: 4px 0 0; overflow-wrap: anywhere; }
+  .pointask-selection-content { width: 100%; max-width: 100%; min-width: 0; margin: 4px 0 0; overflow-wrap: anywhere; }
   .pointask-assistant { color: var(--pa-text); }
   .pointask-message { margin: 12px 0; padding: 0; }
   .pointask-message > strong { font-size: 12px; }
@@ -94,6 +97,7 @@ export const threadStyles = `${sharedShadowStyles}
   .pointask-copy-state { color: var(--pa-muted); font-size: 12px; }
   .pointask-card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
   .pointask-workspace-context { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 9px 0; padding: 7px 9px; border-radius: 8px; background: var(--pa-bg-subtle); color: var(--pa-muted); font-size: 12px; }
+  .pointask-workspace-context > span { min-width: 0; overflow-wrap: anywhere; }
   .pointask-modal-backdrop { position: fixed; z-index: 2147483647; inset: 0; display: grid; place-items: center; padding: 16px; background: #0003; }
   .pointask-modal { width: min(560px, 100%); max-height: calc(100vh - 32px); overflow: auto; padding: 15px; border:1px solid var(--pa-border); border-radius: var(--pa-radius); color:var(--pa-text); background:var(--pa-bg); box-shadow:var(--pa-shadow); }
   .pointask-modal > label, .pointask-context-message-list label { display: block; margin: 8px 0; }

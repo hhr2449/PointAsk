@@ -4,6 +4,8 @@ import type { PendingThread } from '../bridge/pending-thread-manager';
 import type { AnswerSourceLocator, LocalMessage, LocalThread, PointAskWorkspace } from '../shared/local-thread';
 import { RichContentRenderer } from './rich-content-renderer';
 import { richPlainText } from '../shared/rich-content';
+import { CollapsibleQuestionText } from './collapsible-question-text';
+import { answerForRound, attachedRounds, questionForRound } from '../shared/thread-rounds';
 
 interface ThreadCardProps {
   thread: LocalThread; workspace?: PointAskWorkspace; pending: PendingThread | null; copied: boolean; error?: string; manualBranch: boolean; expanded: boolean; sending: boolean; menuOverlay: HTMLElement;
@@ -63,47 +65,44 @@ function MoreMenu({ label, expanded, overlay, children }: { label: string; expan
 
 interface ThreadRound {
   id: string;
+  originalIndex: number;
   question: LocalMessage;
   collapsed: boolean;
-  latestAnswer: LocalMessage | null;
+  latestAnswer: LocalMessage;
 }
 
-function groupRounds(thread: LocalThread): ThreadRound[] {
-  const userMessages = thread.messages.filter((message) => message.role === 'user');
+function groupAttachedRounds(thread: LocalThread): ThreadRound[] {
+  const persisted = attachedRounds(thread);
   const hasExplicitState = Array.isArray(thread.collapsedRoundIds);
   const collapsed = new Set(thread.collapsedRoundIds ?? []);
-  const rounds: ThreadRound[] = [];
-  let current: ThreadRound | null = null;
-  let index = 0;
-  for (const message of thread.messages) {
-    if (message.role === 'user') {
-      current = {
-        id: message.id,
-        question: message,
-        collapsed: hasExplicitState ? collapsed.has(message.id) : index < Math.max(0, userMessages.length - 1),
-        latestAnswer: null,
-      };
-      rounds.push(current);
-      index += 1;
-      continue;
-    }
-    if (!current) continue;
-    current.latestAnswer = message;
-  }
-  return rounds;
+  return persisted.flatMap((round, visibleIndex) => {
+    const question = questionForRound(thread, round.id);
+    const answer = answerForRound(thread, round.id);
+    if (!question || !answer) return [];
+    const persistedIndex = thread.rounds?.findIndex((item) => item.id === round.id) ?? -1;
+    const messageIndex = thread.messages.filter((message) => message.role === 'user').findIndex((message) => message.id === question.id);
+    const originalIndex = persistedIndex >= 0 ? persistedIndex + 1 : messageIndex >= 0 ? messageIndex + 1 : visibleIndex + 1;
+    return [{ id: round.id, originalIndex, question, latestAnswer: answer,
+      collapsed: hasExplicitState ? collapsed.has(round.id) : visibleIndex < Math.max(0, persisted.length - 1) }];
+  });
 }
 
 function roundMenuLabel(threadId: string, roundIndex: number): string {
-  return `${threadId} 问题 ${roundIndex + 1} 更多操作`;
+  return `${threadId} 问答 ${roundIndex + 1} 更多操作`;
 }
 
 function confirmDeleteRound(index: number): boolean {
-  return window.confirm(`删除问题 ${index + 1} 这一轮吗？此操作无法撤销。`);
+  return window.confirm(`删除问答 ${index + 1} 吗？此操作无法撤销。`);
 }
 
 export function ThreadCard(props: ThreadCardProps) {
   const { thread, error, manualBranch, expanded, sending } = props;
-  const rounds = groupRounds(thread);
+  const rounds = groupAttachedRounds(thread);
+  const [expandedQuestionIds, setExpandedQuestionIds] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    const currentIds = new Set(attachedRounds(thread).map((round) => round.id));
+    setExpandedQuestionIds((ids) => new Set([...ids].filter((id) => currentIds.has(id))));
+  }, [thread]);
   const answers = thread.messages.filter((message) => message.role === 'assistant');
   const latestAnswer = answers.at(-1);
   const roundCount = rounds.length;
@@ -156,38 +155,39 @@ export function ThreadCard(props: ThreadCardProps) {
         {rounds.map((round, index) => {
           const expandedRound = !round.collapsed;
           const answer = round.latestAnswer;
-          return <section className="pointask-round" key={round.id}>
+          return <section className="pointask-round" key={round.id} data-pointask-round-id={round.id}
+            data-pointask-original-round={round.originalIndex}>
             <header className="pointask-round-header">
               <button type="button" className="pointask-round-toggle" aria-expanded={expandedRound} onClick={() => props.onToggleRound(round.id)}>
                 <span className="pointask-round-title">
-                  <b>{`问题 ${index + 1}：`}</b>
+                  <b>{`问答 ${index + 1}：`}</b>
                   <span>{summary(richPlainText(round.question.content) || thread.anchor.selectedText)}</span>
                 </span>
                 <span className="pointask-round-chevron" aria-hidden="true">{expandedRound ? '▾' : '▸'}</span>
               </button>
               <MoreMenu label={roundMenuLabel(thread.displayId, index)} expanded={expanded} overlay={props.menuOverlay}>
-                {answer?.answerSource && <button type="button" onClick={() => props.onViewAnswer(answer.answerSource!)}>查看原回答</button>}
+                {answer.answerSource && <button type="button" onClick={() => props.onViewAnswer(answer.answerSource!)}>查看原回答</button>}
                 {attached && index === rounds.length - 1 && <button type="button" onClick={props.onOpenAnswer}>替换回答</button>}
                 {thread.messages.length > 1 && <button
                   type="button"
                   className="pointask-danger"
-                  onClick={() => { if (confirmDeleteRound(index)) props.onDeleteRound(round.id); }}
+                  onClick={() => { if (confirmDeleteRound(index)) props.onDeleteRound(round.question.id); }}
                 >
                   删除本轮
                 </button>}
               </MoreMenu>
             </header>
             {expandedRound && <div className="pointask-round-body">
-              <div className="pointask-round-question" aria-label={`问题 ${index + 1} 正文`}>
-                <div className="pointask-round-question-content"><RichContentRenderer blocks={round.question.content} /></div>
-              </div>
+              <CollapsibleQuestionText blocks={round.question.content} expanded={expandedQuestionIds.has(round.id)}
+                label={`问答 ${index + 1} 问题正文`} onToggle={() => setExpandedQuestionIds((ids) => {
+                  const next = new Set(ids); if (next.has(round.id)) next.delete(round.id); else next.add(round.id); return next;
+                })} />
               <div className="pointask-round-answer">
                 <div className="pointask-round-answer-label">回答</div>
-                <div className="pointask-round-meta">roundId: {round.id}{answer?.attachedAt && <> · 附加于 {new Date(answer.attachedAt).toLocaleString()}</>}</div>
                 <div className="pointask-round-answer-content">
-                  {answer ? <RichContentRenderer blocks={answer.content} /> : <span>{waitingAnswer ? '回答正在生成中……' : waitingSubmission ? '问题已准备好，等待发送。' : '回答尚未生成。'}</span>}
+                  <RichContentRenderer blocks={answer.content} />
                 </div>
-                {answer?.answerSource && <div className="pointask-round-actions">
+                {answer.answerSource && <div className="pointask-round-actions">
                   <button type="button" className="pointask-secondary pointask-round-secondary" onClick={() => props.onViewAnswer(answer.answerSource!)}>查看原回答</button>
                 </div>}
               </div>

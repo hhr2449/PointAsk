@@ -3,27 +3,27 @@ import type { LocalMessage, LocalThread, LocalThreadRound } from './local-thread
 
 export function threadRounds(thread: LocalThread, pending?: PendingThread): LocalThreadRound[] {
   if (thread.rounds?.length) {
-    if (!pending) return thread.rounds;
-    const currentId = pending.roundId ?? thread.rounds.at(-1)?.id;
-    return thread.rounds.map((round) => round.id !== currentId ? round : {
-      ...round, pendingId: pending.id, promptHash: pending.promptHash || round.promptHash,
-      assistantFingerprintsBefore: pending.assistantFingerprintsBefore ?? round.assistantFingerprintsBefore,
-      candidateAnswerFingerprint: pending.candidateAnswerFingerprint ?? round.candidateAnswerFingerprint,
-      status: round.status === 'attached' ? 'attached' : pendingStatus(pending.status), updatedAt: pending.updatedAt,
-    });
+    // LocalThreadRound is the canonical persisted lifecycle snapshot. Pending
+    // records describe submission transport and are folded into the round only
+    // by syncPendingRound; readers must not overlay a potentially newer pending
+    // on an older UI snapshot and accidentally change a different round.
+    return thread.rounds;
   }
   const answers = new Map<string, LocalMessage>();
-  let latestUserId: string | undefined;
+  let latestRoundId: string | undefined;
   for (const message of thread.messages) {
-    if (message.role === 'user') latestUserId = message.id;
-    else if (message.roundId || latestUserId) answers.set(message.roundId ?? latestUserId!, message);
+    if (message.role === 'user') latestRoundId = message.roundId ?? message.id;
+    else if (message.roundId || latestRoundId) answers.set(message.roundId ?? latestRoundId!, message);
   }
   return thread.messages.filter((message) => message.role === 'user').map((message) => {
-    const answer = answers.get(message.id);
-    const isCurrent = Boolean(pending && (pending.roundId === message.id || (!pending.roundId &&
+    const roundId = message.roundId ?? message.id;
+    const answer = answers.get(roundId);
+    const isCurrent = Boolean(pending && (pending.roundId === roundId || (!pending.roundId &&
       message.id === thread.messages.filter((item) => item.role === 'user').at(-1)?.id)));
     return {
-      id: message.id,
+      id: roundId,
+      questionMessageId: message.id,
+      answerMessageId: answer?.id,
       pendingId: isCurrent ? pending?.id ?? `pointask-legacy-${message.id}` : `pointask-legacy-${message.id}`,
       promptHash: isCurrent ? pending?.promptHash || `pointask-legacy-${message.id}` : `pointask-legacy-${message.id}`,
       assistantFingerprintsBefore: isCurrent ? pending?.assistantFingerprintsBefore ?? [] : [],
@@ -47,13 +47,20 @@ export function pendingStatus(status?: PendingThread['status']): LocalThreadRoun
   return 'waiting_for_submission';
 }
 
+export function roundIdForPending(thread: LocalThread, pending: PendingThread): string | undefined {
+  return pending.roundId ?? threadRounds(thread).find((round) => round.pendingId === pending.id)?.id;
+}
+
 export function syncPendingRound(thread: LocalThread, pending: PendingThread, status = pendingStatus(pending.status)): LocalThread {
-  const rounds = threadRounds(thread, pending);
-  const id = pending.roundId ?? thread.messages.filter((message) => message.role === 'user').at(-1)?.id;
+  const rounds = threadRounds(thread);
+  const latestQuestion = thread.messages.filter((message) => message.role === 'user').at(-1);
+  const id = pending.roundId ?? latestQuestion?.roundId ?? latestQuestion?.id;
   if (!id) return thread;
   const now = pending.updatedAt;
   const value: LocalThreadRound = {
     id, pendingId: pending.id, promptHash: pending.promptHash || `pointask-prompt-${pending.id}`,
+    questionMessageId: rounds.find((round) => round.id === id)?.questionMessageId ?? latestQuestion?.id ?? id,
+    answerMessageId: rounds.find((round) => round.id === id)?.answerMessageId,
     assistantFingerprintsBefore: pending.assistantFingerprintsBefore ?? [],
     candidateAnswerFingerprint: pending.candidateAnswerFingerprint,
     status, createdAt: rounds.find((round) => round.id === id)?.createdAt ?? pending.createdAt, updatedAt: now,
@@ -67,17 +74,30 @@ export function syncPendingRound(thread: LocalThread, pending: PendingThread, st
 }
 
 export function answerForRound(thread: LocalThread, roundId: string): LocalMessage | undefined {
-  let latestUserId: string | undefined;
+  let latestRoundId: string | undefined;
   for (const message of thread.messages) {
-    if (message.role === 'user') latestUserId = message.id;
-    else if ((message.roundId ?? latestUserId) === roundId) return message;
+    if (message.role === 'user') latestRoundId = message.roundId ?? message.id;
+    else if ((message.roundId ?? latestRoundId) === roundId) return message;
   }
   return undefined;
 }
 
+/** Complete rounds that have actually been persisted into the source card. */
+export function attachedRounds(thread: LocalThread): LocalThreadRound[] {
+  return threadRounds(thread).filter((round) => round.status === 'attached' && round.persistenceStatus === 'attached' &&
+    Boolean(questionForRound(thread, round.id)) && Boolean(answerForRound(thread, round.id)));
+}
+
+export function questionForRound(thread: LocalThread, roundId: string): LocalMessage | undefined {
+  const questionMessageId = thread.rounds?.find((round) => round.id === roundId)?.questionMessageId;
+  return thread.messages.find((message) => message.role === 'user' &&
+    (message.id === questionMessageId || message.roundId === roundId || !questionMessageId && message.id === roundId));
+}
+
 export function insertRoundAnswer(thread: LocalThread, roundId: string, answer: LocalMessage): LocalThread {
   if (answerForRound(thread, roundId)) return thread;
-  const userIndex = thread.messages.findIndex((message) => message.role === 'user' && message.id === roundId);
+  const question = questionForRound(thread, roundId);
+  const userIndex = question ? thread.messages.indexOf(question) : -1;
   if (userIndex < 0) return thread;
   const messages = [...thread.messages];
   let insertAt = userIndex + 1;

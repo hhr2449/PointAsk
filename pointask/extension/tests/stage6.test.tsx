@@ -44,6 +44,16 @@ function attachedThread(id = 'pointask-multi'): LocalThread {
   };
 }
 
+function mockQuestionOverflow(): () => void {
+  const scrollHeight = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+    return this.classList.contains('pointask-question-text') ? 120 : 0;
+  });
+  const clientHeight = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+    return this.classList.contains('pointask-question-text') ? 72 : 0;
+  });
+  return () => { scrollHeight.mockRestore(); clientHeight.mockRestore(); };
+}
+
 describe('multi-turn prompt and thread flow', () => {
   beforeEach(() => { document.body.innerHTML = '<p id="anchor">来源段落</p>'; });
 
@@ -88,6 +98,12 @@ describe('multi-turn prompt and thread flow', () => {
     expect(update && 'pendingThread' in update ? update.pendingThread.generatedPrompt : '').toContain('我的问题：\n第二问');
     expect(update && 'pendingThread' in update ? update.pendingThread.id : '').not.toBe('pointask-multi');
     expect(update && 'pendingThread' in update ? update.pendingThread.roundId : '').toBeTruthy();
+    if (!update || !('pendingThread' in update) || !update.localThread) throw new Error('missing continuation payload');
+    const createdRound = update.localThread.rounds?.find((round) => round.id === update.pendingThread.roundId);
+    const createdQuestion = update.localThread.messages.find((message) => message.roundId === update.pendingThread.roundId);
+    expect(createdRound).toMatchObject({ questionMessageId: createdQuestion?.id, pendingId: update.pendingThread.id,
+      status: 'waiting_for_submission' });
+    expect(createdRound?.id).not.toBe(createdQuestion?.id);
     expect(writeText).not.toHaveBeenCalled();
     expect(sent.some((message) => message.type === 'pointask:open-answer-page')).toBe(true);
     expect(sent.some((message) => message.type === 'pointask:reserve-prompt-submission')).toBe(false);
@@ -108,13 +124,147 @@ describe('multi-turn prompt and thread flow', () => {
     expect(toggles).toHaveLength(2);
     expect(toggles?.[0]?.getAttribute('aria-expanded')).toBe('false');
     expect(toggles?.[1]?.getAttribute('aria-expanded')).toBe('true');
-    expect(shadow?.textContent).toContain('问题 1：第一问');
-    expect(shadow?.textContent).toContain('问题 2：第二问：解释 CUDA 内存模型');
+    expect(shadow?.textContent).toContain('问答 1：第一问');
+    expect(shadow?.textContent).toContain('问答 2：第二问：解释 CUDA 内存模型');
     expect(shadow?.textContent).not.toContain('用户问题');
     expect(shadow?.textContent).not.toContain('已附加');
     expect(shadow?.querySelectorAll('.pointask-round-question')).toHaveLength(1);
     expect(shadow?.querySelector('.pointask-round-question-label')).toBeNull();
     expect(shadow?.querySelector('.pointask-round-answer .pointask-secondary')).not.toBeNull();
+  });
+
+  it('renders only complete attached rounds with continuous display numbers while preserving stable round ids', async () => {
+    const thread = attachedThread(); thread.expanded = true; thread.collapsedRoundIds = [];
+    thread.messages = [
+      { id: 'message-q1', roundId: 'round-1', role: 'user', content: [{ type: 'text', content: '未选择的第一问' }], attachedManually: false, createdAt: timestamp },
+      { id: 'message-q2', roundId: 'round-2', role: 'user', content: [{ type: 'text', content: '实际附加的第二问' }], attachedManually: false, createdAt: timestamp },
+      { id: 'message-a2', roundId: 'round-2', role: 'assistant', content: [{ type: 'text', content: '第二轮回答' }], attachedManually: true, attachedAt: timestamp, createdAt: timestamp },
+      { id: 'message-q3', roundId: 'round-3', role: 'user', content: [{ type: 'text', content: '缺少回答的第三问' }], attachedManually: false, createdAt: timestamp },
+      { id: 'message-q4', roundId: 'round-4', role: 'user', content: [{ type: 'text', content: '实际附加的第四问' }], attachedManually: false, createdAt: timestamp },
+      { id: 'message-a4', roundId: 'round-4', role: 'assistant', content: [{ type: 'text', content: '第四轮回答' }], attachedManually: true, attachedAt: timestamp, createdAt: timestamp },
+    ];
+    thread.rounds = ['round-1', 'round-2', 'round-3', 'round-4'].map((id, index) => ({ id,
+      questionMessageId: `message-q${index + 1}`, answerMessageId: id === 'round-2' ? 'message-a2' : id === 'round-4' ? 'message-a4' : undefined,
+      pendingId: `pending-${index + 1}`, promptHash: `hash-${index + 1}`, assistantFingerprintsBefore: [],
+      status: id === 'round-2' || id === 'round-4' ? 'attached' as const : id === 'round-1' ? 'answer_ready' as const : 'waiting_for_answer' as const,
+      persistenceStatus: id === 'round-2' || id === 'round-4' ? 'attached' as const : 'not_captured' as const,
+      attachedAt: id === 'round-2' || id === 'round-4' ? timestamp : undefined, createdAt: timestamp, updatedAt: timestamp,
+    }));
+    const manager = new InlineThreadManager(new PendingThreadManager(), new ClipboardManager(undefined, () => false));
+    await act(() => manager.mount(thread, document.getElementById('anchor') as HTMLElement));
+    const shadow = manager.getHost(thread.id)?.shadowRoot;
+    const rendered = [...shadow!.querySelectorAll<HTMLElement>('.pointask-round')];
+    expect(rendered).toHaveLength(2);
+    expect(rendered.map((element) => element.dataset.pointaskRoundId)).toEqual(['round-2', 'round-4']);
+    expect(rendered.map((element) => element.dataset.pointaskOriginalRound)).toEqual(['2', '4']);
+    expect(rendered.map((element) => element.querySelector('.pointask-round-title')?.textContent)).toEqual([
+      '问答 1：实际附加的第二问', '问答 2：实际附加的第四问',
+    ]);
+    expect(shadow?.textContent).not.toContain('未选择的第一问');
+    expect(shadow?.textContent).not.toContain('缺少回答的第三问');
+    expect(shadow?.textContent).not.toContain('回答尚未生成');
+    await act(() => manager.syncVisible(new Set()));
+  });
+
+  it('constrains long text, lists, and code inside the source card instead of widening its parent', async () => {
+    const thread = attachedThread(); thread.expanded = true;
+    thread.messages[0] = { ...thread.messages[0]!, content: [{ type: 'text', content: 'x'.repeat(600) }] };
+    thread.messages[1] = { ...thread.messages[1]!, content: [
+      { type: 'unordered_list', items: [{ type: 'list_item', children: [{ type: 'text', content: 'y'.repeat(600) }] }] },
+      { type: 'code_block', content: 'z'.repeat(1_000), language: 'text' },
+    ] };
+    const manager = new InlineThreadManager(new PendingThreadManager(), new ClipboardManager(undefined, () => false));
+    await act(() => manager.mount(thread, document.getElementById('anchor') as HTMLElement));
+    const shadow = manager.getHost(thread.id)?.shadowRoot;
+    const styles = shadow?.querySelector('style')?.textContent ?? '';
+    expect(styles).toContain('pointask-thread-card { display: block; box-sizing: border-box; width: 100%; max-width: 680px; min-width: 0;');
+    expect(styles).toContain('.pointask-round-body { display: grid; width: 100%; max-width: 100%; min-width: 0;');
+    expect(styles).toContain('.pointask-rich-content { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; overflow-wrap: anywhere;');
+    expect(styles).toContain('.pointask-rich-content pre { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; overflow-x: auto;');
+    expect(styles).toContain('.pointask-rich-content :where(ul, ol) { width: 100%; padding-left: 1.5em; }');
+    expect(shadow?.querySelector('.pointask-round-answer-content pre')).not.toBeNull();
+    expect(shadow?.querySelector('.pointask-round-answer-content ul')).not.toBeNull();
+    await act(() => manager.syncVisible(new Set()));
+  });
+
+  it('hides internal round metadata and leaves a short question fully visible without a toggle', async () => {
+    const thread = attachedThread(); thread.expanded = true;
+    thread.messages[1] = { ...thread.messages[1]!, roundId: 'q1', attachedAt: timestamp };
+    const manager = new InlineThreadManager(new PendingThreadManager(), new ClipboardManager(undefined, () => false));
+    await act(() => manager.mount(thread, document.getElementById('anchor') as HTMLElement));
+    const shadow = manager.getHost(thread.id)?.shadowRoot;
+    expect(shadow?.querySelector('.pointask-round-meta')).toBeNull();
+    expect(shadow?.textContent).not.toContain('roundId:');
+    expect(shadow?.textContent).not.toContain('附加于');
+    expect(shadow?.querySelector('.pointask-question-toggle')).toBeNull();
+    expect(shadow?.querySelector('.pointask-round-question-content')?.textContent).toContain('第一问');
+    await act(() => manager.syncVisible(new Set()));
+  });
+
+  it('clamps an overflowing question to three lines and expands it into an internally scrolling region', async () => {
+    const restoreMetrics = mockQuestionOverflow();
+    try {
+      const thread = attachedThread(); thread.expanded = true;
+      thread.messages[0] = { ...thread.messages[0]!, content: [{ type: 'text', content: Array.from({ length: 12 }, (_, index) => `第${index + 1}行问题`).join('\n') }] };
+      const manager = new InlineThreadManager(new PendingThreadManager(), new ClipboardManager(undefined, () => false));
+      await act(() => manager.mount(thread, document.getElementById('anchor') as HTMLElement));
+      const shadow = manager.getHost(thread.id)?.shadowRoot;
+      const button = shadow?.querySelector<HTMLButtonElement>('.pointask-question-toggle') as HTMLButtonElement;
+      const content = shadow?.querySelector<HTMLElement>('.pointask-question-text') as HTMLElement;
+      expect(button.textContent).toBe('展开');
+      expect(button.type).toBe('button');
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+      expect(button.getAttribute('aria-controls')).toBe(content.id);
+      expect(content.classList.contains('pointask-question-text-collapsed')).toBe(true);
+      expect(shadow?.textContent).toContain('-webkit-line-clamp: 3');
+      button.focus(); expect(shadow?.activeElement).toBe(button);
+      await act(() => button.click());
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+      expect(button.textContent).toBe('收起');
+      expect(content.classList.contains('pointask-question-text-expanded')).toBe(true);
+      expect(shadow?.textContent).toContain('max-height: min(240px, 32vh)');
+      expect(shadow?.textContent).toContain('overflow-y: auto');
+      expect(shadow?.textContent).toContain('white-space: pre-wrap');
+      await act(() => button.click());
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+      expect(content.classList.contains('pointask-question-text-collapsed')).toBe(true);
+      await act(() => manager.syncVisible(new Set()));
+    } finally { restoreMetrics(); }
+  });
+
+  it('keeps question expansion independent for each round', async () => {
+    const restoreMetrics = mockQuestionOverflow();
+    try {
+      const thread = attachedThread(); thread.expanded = true; thread.collapsedRoundIds = [];
+      thread.messages.push(
+        { id: 'q2', role: 'user', content: [{ type: 'text', content: '第二轮很长的问题\n'.repeat(8) }], attachedManually: false, createdAt: timestamp },
+        { id: 'a2', role: 'assistant', content: [{ type: 'text', content: '第二答' }], attachedManually: true, createdAt: timestamp },
+      );
+      const manager = new InlineThreadManager(new PendingThreadManager(), new ClipboardManager(undefined, () => false));
+      await act(() => manager.mount(thread, document.getElementById('anchor') as HTMLElement));
+      const buttons = manager.getHost(thread.id)?.shadowRoot?.querySelectorAll<HTMLButtonElement>('.pointask-question-toggle');
+      expect(buttons).toHaveLength(2);
+      await act(() => buttons?.[0]?.click());
+      expect(buttons?.[0]?.getAttribute('aria-expanded')).toBe('true');
+      expect(buttons?.[1]?.getAttribute('aria-expanded')).toBe('false');
+      await act(() => manager.syncVisible(new Set()));
+    } finally { restoreMetrics(); }
+  });
+
+  it('keeps rich answer rendering intact in both light and dark card themes', async () => {
+    const lightAnchor = document.getElementById('anchor') as HTMLElement; lightAnchor.style.backgroundColor = 'rgb(255, 255, 255)';
+    const darkAnchor = document.createElement('p'); darkAnchor.id = 'dark-anchor'; darkAnchor.style.backgroundColor = 'rgb(32, 33, 35)';
+    document.body.append(darkAnchor);
+    const lightThread = attachedThread('light-thread'); lightThread.expanded = true;
+    lightThread.messages[1] = { ...lightThread.messages[1]!, content: [{ type: 'strong', children: [{ type: 'text', content: '加粗回答' }] }] };
+    const darkThread = { ...lightThread, id: 'dark-thread' };
+    const manager = new InlineThreadManager(new PendingThreadManager(), new ClipboardManager(undefined, () => false));
+    await act(() => manager.mount(lightThread, lightAnchor)); await act(() => manager.mount(darkThread, darkAnchor));
+    const lightHost = manager.getHost(lightThread.id); const darkHost = manager.getHost(darkThread.id);
+    expect(lightHost?.dataset.pointaskTheme).toBe('light'); expect(darkHost?.dataset.pointaskTheme).toBe('dark');
+    expect(lightHost?.shadowRoot?.querySelector('.pointask-round-answer-content strong')?.textContent).toBe('加粗回答');
+    expect(darkHost?.shadowRoot?.querySelector('.pointask-round-answer-content strong')?.textContent).toBe('加粗回答');
+    await act(() => manager.syncVisible(new Set()));
   });
 
   it('opens only the round that receives a new answer', async () => {
@@ -205,6 +355,58 @@ describe('multi-turn prompt and thread flow', () => {
 });
 
 describe('conversation association conflicts and restoration', () => {
+  it('recognizes the newest answer on its explicitly mapped round instead of the previous round', () => {
+    const coordinator = new PendingAssociationCoordinator(() => new Date(timestamp));
+    const value = { ...pending('workspace-round-map'), threadId: 'workspace-round-map', roundId: 'round-2',
+      answerMode: 'workspace' as const, promptHash: 'hash-2', status: 'waiting_for_answer' as const,
+      targetConversationUrl: 'https://chatgpt.com/c/shared', targetConversationKey: 'https://chatgpt.com/c/shared' };
+    const local: LocalThread = { ...attachedThread('workspace-round-map'), answerMode: 'workspace', status: 'waiting_for_answer',
+      messages: [
+        { id: 'question-message-1', roundId: 'round-1', role: 'user', content: [{ type: 'text', content: '第一问' }], attachedManually: false, createdAt: timestamp },
+        { id: 'question-message-2', roundId: 'round-2', role: 'user', content: [{ type: 'text', content: '第二问' }], attachedManually: false, createdAt: timestamp },
+      ],
+      rounds: [
+        { id: 'round-1', questionMessageId: 'question-message-1', pendingId: 'pending-1', promptHash: 'hash-1',
+          assistantFingerprintsBefore: [], status: 'answer_ready', persistenceStatus: 'staged',
+          stagedAnswer: [{ type: 'text', content: '第一答' }], answerSource: { conversationUrl: 'https://chatgpt.com/c/shared',
+            conversationKey: 'https://chatgpt.com/c/shared', messageFingerprint: 'answer-1' }, createdAt: timestamp, updatedAt: timestamp },
+        { id: 'round-2', questionMessageId: 'question-message-2', pendingId: value.id, promptHash: 'hash-2',
+          assistantFingerprintsBefore: ['answer-1'], status: 'waiting_for_answer', persistenceStatus: 'not_captured',
+          createdAt: timestamp, updatedAt: timestamp },
+      ] };
+    coordinator.create(value, 1, local); coordinator.markTargetOpened(value.id, 20, 'https://chatgpt.com/c/shared');
+    const updated = coordinator.markCandidate(value.id, 20, 'answer-2', false)!;
+    expect(updated.localThread.rounds?.find((round) => round.id === 'round-1')).toMatchObject({
+      status: 'answer_ready', persistenceStatus: 'staged',
+    });
+    expect(updated.localThread.rounds?.find((round) => round.id === 'round-1')?.candidateAnswerFingerprint).toBeUndefined();
+    expect(updated.localThread.rounds?.find((round) => round.id === 'round-2')).toMatchObject({
+      status: 'answer_ready', persistenceStatus: 'not_captured', candidateAnswerFingerprint: 'answer-2',
+      answerSource: { messageFingerprint: 'answer-2' },
+    });
+  });
+
+  it('can stage an explicitly selected completed round without treating the active round as its identity', () => {
+    const coordinator = new PendingAssociationCoordinator(() => new Date(timestamp));
+    const value = { ...pending('workspace-explicit-stage'), threadId: 'workspace-explicit-stage', roundId: 'round-2',
+      answerMode: 'workspace' as const, promptHash: 'hash-2', status: 'answer_ready' as const,
+      targetConversationUrl: 'https://chatgpt.com/c/shared' };
+    const local: LocalThread = { ...attachedThread('workspace-explicit-stage'), answerMode: 'workspace', status: 'answer_ready',
+      messages: [
+        { id: 'message-1', roundId: 'round-1', role: 'user', content: [{ type: 'text', content: '第一问' }], attachedManually: false, createdAt: timestamp },
+        { id: 'message-2', roundId: 'round-2', role: 'user', content: [{ type: 'text', content: '第二问' }], attachedManually: false, createdAt: timestamp },
+      ], rounds: ['round-1', 'round-2'].map((roundId, index) => ({ id: roundId, questionMessageId: `message-${index + 1}`,
+        pendingId: `pending-${index + 1}`, promptHash: `hash-${index + 1}`, assistantFingerprintsBefore: [], status: 'answer_ready' as const,
+        persistenceStatus: 'not_captured' as const, createdAt: timestamp, updatedAt: timestamp })) };
+    coordinator.create(value, 1, local); coordinator.markTargetOpened(value.id, 20, 'https://chatgpt.com/c/shared');
+    const locator = { conversationUrl: 'https://chatgpt.com/c/shared', conversationKey: 'https://chatgpt.com/c/shared', messageFingerprint: 'answer-1' };
+    const staged = coordinator.stageRoundAnswer(value.id, 20, 'round-1', 'hash-1', 'https://chatgpt.com/c/shared', false,
+      [{ type: 'text', content: '第一答' }], locator);
+    expect(staged?.pendingThread.roundId).toBe('round-2');
+    expect(staged?.localThread.rounds?.find((round) => round.id === 'round-1')).toMatchObject({ persistenceStatus: 'staged' });
+    expect(staged?.localThread.rounds?.find((round) => round.id === 'round-2')).toMatchObject({ persistenceStatus: 'not_captured' });
+  });
+
   it('stages a completed Workspace round once and clears only its temporary answer after attachment', () => {
     const coordinator = new PendingAssociationCoordinator(() => new Date(timestamp));
     const value = { ...pending('workspace-stage'), threadId: 'workspace-stage', roundId: 'q1', answerMode: 'workspace' as const,

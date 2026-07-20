@@ -121,7 +121,12 @@ export interface LocalMessage {
 export type RoundPersistenceStatus = 'not_captured' | 'staged' | 'attaching' | 'attached' | 'capture_failed';
 
 export interface LocalThreadRound {
+  /** Stable round identity. Never reuse a pending or message id here. */
   id: string;
+  /** Local user message that owns this round. */
+  questionMessageId?: string;
+  /** Local assistant message created after attachment. */
+  answerMessageId?: string;
   pendingId: string;
   promptHash: string;
   assistantFingerprintsBefore: string[];

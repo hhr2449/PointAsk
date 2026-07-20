@@ -20,7 +20,7 @@ import type { SelectionData } from './selection-manager';
 import { buildPrompt } from '../bridge/prompt-builder';
 import { stableTextHash } from '../shared/text-utils';
 import { textBlocks } from '../shared/rich-content';
-import { threadRounds } from '../shared/thread-rounds';
+import { roundIdForPending, threadRounds } from '../shared/thread-rounds';
 import type { SelectableRound } from '../components/round-selection-view';
 
 interface MountedAnswerAction {
@@ -44,7 +44,7 @@ type WorkspaceAttachPhase = 'validate' | 'extract' | 'persist' | 'navigate';
 interface RejectedWorkspaceRound { roundId: string; reason: string; }
 type WorkspaceStagingTrigger = 'continue' | 'attach_all' | 'attach_selected';
 type EnsureRoundStagedCode = 'staged' | 'already_staged' | 'already_attached' | 'answer_still_streaming' |
-  'answer_not_loaded' | 'answer_ambiguous' | 'capture_failed';
+  'answer_not_complete' | 'answer_not_loaded' | 'answer_ambiguous' | 'capture_failed';
 interface EnsureRoundStagedResult { ok: boolean; code: EnsureRoundStagedCode; record?: PendingAssociation; error?: string; }
 
 function logWorkspaceAttach(details: { threadId: string; selectedRoundIds: string[]; validRoundIds: string[];
@@ -63,6 +63,17 @@ function logWorkspaceStaging(details: { threadId: string; roundId: string; activ
   console.debug(`[PointAsk staging]\nthreadId=${details.threadId}\nroundId=${details.roundId}\nactiveRoundId=${details.activeRoundId ?? ''}` +
     `\ntrigger=${details.trigger}\nbeforeStatus=${details.beforeStatus ?? ''}\nafterStatus=${details.afterStatus ?? ''}` +
     `\nphase=${details.phase}\nerror=${error ?? ''}`);
+}
+
+function logWorkspaceRound(details: { threadId: string; roundId: string; activeRoundId?: string; pendingId?: string;
+  trigger: 'answer_recognized' | 'continue' | 'attach_all' | 'attach_selected'; beforeStatus?: string; afterStatus?: string;
+  phase: 'create_round' | 'recognize_answer' | 'stage' | 'attach'; selectedRoundIds?: string[]; error?: unknown }): void {
+  if (!import.meta.env.DEV) return;
+  const error = details.error instanceof Error ? details.error.message : details.error ? String(details.error) : undefined;
+  console.debug(`[PointAsk round]\nthreadId=${details.threadId}\nroundId=${details.roundId}` +
+    `\nactiveRoundId=${details.activeRoundId ?? ''}\npendingId=${details.pendingId ?? ''}\ntrigger=${details.trigger}` +
+    `\nbeforeStatus=${details.beforeStatus ?? ''}\nafterStatus=${details.afterStatus ?? ''}\nphase=${details.phase}` +
+    `\nselectedRoundIds=${JSON.stringify(details.selectedRoundIds ?? [])}\nerror=${error ?? ''}`);
 }
 
 export class PendingBannerManager {
@@ -404,6 +415,10 @@ export class PendingBannerManager {
       for (const payload of payloads) logWorkspaceStaging({ threadId: record.localThread.id, roundId: payload.roundId,
         activeRoundId: record.pendingThread.roundId, trigger: requestedRoundIds ? 'attach_selected' : 'attach_all',
         beforeStatus: 'staged', afterStatus: 'attached', phase: 'attach' });
+      for (const payload of payloads) logWorkspaceRound({ threadId: record.localThread.id, roundId: payload.roundId,
+        activeRoundId: record.pendingThread.roundId, pendingId: record.pendingThread.id,
+        trigger: requestedRoundIds ? 'attach_selected' : 'attach_all', beforeStatus: 'staged', afterStatus: 'attached',
+        phase: 'attach', selectedRoundIds: selectedIds });
       this.records.set(id, updated); this.candidates.delete(id); this.workspaceSelection = null; this.errors.delete(id); this.render();
       return updated;
     } catch (error) {
@@ -428,7 +443,7 @@ export class PendingBannerManager {
 
   private async performContinueWorkspaceThread(id: string, question: string, skipCapture: boolean): Promise<ContinueWorkspaceResult> {
     let record = this.records.get(id); if (!record || !question.trim()) return { ok: false };
-    const currentRoundId = record.pendingThread.roundId ?? threadRounds(record.localThread, record.pendingThread).at(-1)?.id;
+    const currentRoundId = roundIdForPending(record.localThread, record.pendingThread);
     const currentRound = this.resolveWorkspaceRounds(record).find((round) => round.id === currentRoundId);
     if (!currentRound || currentRound.status !== 'answer_ready' && currentRound.persistenceStatus !== 'attached') {
       const error = '当前轮回答尚未生成完成，无法继续追问'; this.errors.set(id, error); this.render(); return { ok: false, error };
@@ -453,12 +468,13 @@ export class PendingBannerManager {
         record = staged.record ?? record;
       }
     }
-    const confirmedActiveRoundId = record.pendingThread.roundId ?? threadRounds(record.localThread, record.pendingThread).at(-1)?.id;
+    const confirmedActiveRoundId = roundIdForPending(record.localThread, record.pendingThread);
     if (confirmedActiveRoundId !== currentRoundId) {
       const error = '当前轮次已变化，请重新提交继续追问'; this.errors.set(id, error); this.render(); return { ok: false, error };
     }
     const timestamp = new Date().toISOString();
-    const roundId = `pointask-message-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const roundId = `pointask-round-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const questionMessageId = `pointask-message-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const pendingId = `pointask-pending-${typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
     const generatedPrompt = buildPrompt({ selectedText: record.localThread.anchor.selectedText,
       paragraphText: record.localThread.anchor.paragraphText, userQuestion: question.trim(), previousLocalMessages: record.localThread.messages,
@@ -468,11 +484,13 @@ export class PendingBannerManager {
       candidateAnswerFingerprint: undefined, submittedPromptHash: undefined, submittedAt: undefined, status: 'prompt_ready' as const,
       createdAt: timestamp, updatedAt: timestamp };
     const localThread = { ...record.localThread, messages: [...record.localThread.messages, {
-      id: roundId, role: 'user' as const, content: textBlocks(question.trim()), attachedManually: false, createdAt: timestamp,
+      id: questionMessageId, roundId, role: 'user' as const, content: textBlocks(question.trim()), attachedManually: false, createdAt: timestamp,
     }], rounds: [...threadRounds(record.localThread, record.pendingThread), {
-      id: roundId, pendingId, promptHash: stableTextHash(generatedPrompt), assistantFingerprintsBefore: this.adapter?.getAssistantMessageFingerprints() ?? [],
+      id: roundId, questionMessageId, pendingId, promptHash: stableTextHash(generatedPrompt), assistantFingerprintsBefore: this.adapter?.getAssistantMessageFingerprints() ?? [],
       status: 'waiting_for_submission' as const, persistenceStatus: 'not_captured' as const, createdAt: timestamp, updatedAt: timestamp,
     }], status: 'waiting_for_submission' as const, updatedAt: timestamp };
+    logWorkspaceRound({ threadId: record.localThread.id, roundId, activeRoundId: currentRoundId, pendingId,
+      trigger: 'continue', beforeStatus: currentRound.persistenceStatus, afterStatus: 'waiting_for_submission', phase: 'create_round' });
     this.sendingIds.add(pendingId); this.errors.delete(id); this.render();
     try {
       const created = await this.bridge.savePendingThread(pending, localThread);
@@ -498,12 +516,12 @@ export class PendingBannerManager {
   private async performEnsureRoundStaged(threadId: string, roundId: string,
     trigger: WorkspaceStagingTrigger): Promise<EnsureRoundStagedResult> {
     const record = [...this.records.values()].find((item) => item.localThread.id === threadId);
-    const activeRoundId = record?.pendingThread.roundId ?? (record ? threadRounds(record.localThread, record.pendingThread).at(-1)?.id : undefined);
+    const activeRoundId = record ? roundIdForPending(record.localThread, record.pendingThread) : undefined;
     const round = record ? this.resolveWorkspaceRounds(record).find((item) => item.id === roundId) : undefined;
     const beforeStatus = round?.persistenceStatus;
     const log = (phase: 'resolve' | 'extract' | 'persist' | 'attach', afterStatus?: string, error?: unknown) =>
       logWorkspaceStaging({ threadId, roundId, activeRoundId, trigger, beforeStatus, afterStatus, phase, error });
-    if (!record || !round || activeRoundId !== roundId || record.localThread.id !== (record.pendingThread.threadId || record.pendingThread.id)) {
+    if (!record || !round || record.localThread.id !== (record.pendingThread.threadId || record.pendingThread.id)) {
       log('resolve', beforeStatus, '轮次状态已变化');
       return { ok: false, code: 'capture_failed', error: '当前回答暂存失败：轮次状态已变化' };
     }
@@ -517,6 +535,10 @@ export class PendingBannerManager {
       log('resolve', beforeStatus, 'answer_still_streaming');
       return { ok: false, code: 'answer_still_streaming', error: '当前回答仍在生成，请等待完成后重试' };
     }
+    if (round.status !== 'answer_ready') {
+      log('resolve', beforeStatus, 'answer_not_complete');
+      return { ok: false, code: 'answer_not_complete', error: '当前轮回答尚未完成' };
+    }
     const fallbackFingerprint = round.candidate?.fingerprint ?? round.knownAnswerFingerprint;
     const fallbackLocator = round.answerLocator ?? (fallbackFingerprint ? {
       conversationUrl: window.location.href, conversationKey: this.adapter?.getConversationKey() ?? window.location.href,
@@ -525,16 +547,19 @@ export class PendingBannerManager {
     const fail = async (code: Exclude<EnsureRoundStagedCode, 'staged' | 'already_staged' | 'already_attached' | 'answer_still_streaming'>,
       message: string, phase: 'resolve' | 'extract' | 'persist'): Promise<EnsureRoundStagedResult> => {
       try {
-        const updated = await this.bridge.stageRoundAnswer(record.pendingThread.id, round.id, record.pendingThread.promptHash ?? '', {
+        const storedRound = threadRounds(record.localThread).find((item) => item.id === round.id);
+        const updated = await this.bridge.stageRoundAnswer(record.pendingThread.id, round.id, storedRound?.promptHash ?? '', {
           captureFailed: true, answerSource: fallbackLocator, targetUrl: window.location.href,
         });
         this.records.set(record.pendingThread.id, updated); this.render();
       } catch { /* Keep the user's draft even if persisting the failure marker also fails. */ }
       log(phase, 'capture_failed', message);
+      logWorkspaceRound({ threadId, roundId, activeRoundId, pendingId: round ?
+        threadRounds(record.localThread).find((item) => item.id === round.id)?.pendingId : undefined,
+      trigger, beforeStatus, afterStatus: 'capture_failed', phase: 'stage', error: message });
       this.errors.set(record.pendingThread.id, message); this.render();
       return { ok: false, code, error: `当前回答暂存失败：${message}` };
     };
-    if (round.status !== 'answer_ready') return fail('capture_failed', '当前轮回答尚未完成', 'resolve');
     if (!record.targetConversationUrl || !isCompatibleChatGptTargetUrl(record.targetConversationUrl, window.location.href)) {
       return fail('capture_failed', '当前页面不是目标 Workspace', 'resolve');
     }
@@ -548,11 +573,14 @@ export class PendingBannerManager {
     const answerSource = { conversationUrl: window.location.href,
       conversationKey: this.adapter?.getConversationKey() ?? window.location.href, messageFingerprint: round.candidate.fingerprint };
     try {
-      const updated = await this.bridge.stageRoundAnswer(record.pendingThread.id, round.id, record.pendingThread.promptHash ?? '', {
+      const storedRound = threadRounds(record.localThread).find((item) => item.id === round.id);
+      const updated = await this.bridge.stageRoundAnswer(record.pendingThread.id, round.id, storedRound?.promptHash ?? '', {
         captureFailed: false, richContent: rich.blocks, answerSource, targetUrl: window.location.href,
       });
       this.records.set(record.pendingThread.id, updated); this.errors.delete(record.pendingThread.id); this.render();
       log('persist', 'staged');
+      logWorkspaceRound({ threadId, roundId, activeRoundId, pendingId: storedRound?.pendingId, trigger,
+        beforeStatus, afterStatus: 'staged', phase: 'stage' });
       return { ok: true, code: 'staged', record: updated };
     } catch (error) {
       return fail('capture_failed', error instanceof Error ? error.message : '本地保存失败', 'persist');
@@ -561,9 +589,8 @@ export class PendingBannerManager {
 
   private resolveWorkspaceRounds(record: PendingAssociation): ResolvedWorkspaceRound[] {
     const questions = new Map(record.localThread.messages.filter((message) => message.role === 'user')
-      .map((message) => [message.id, richPlainText(message.content)]));
+      .map((message) => [message.roundId ?? message.id, richPlainText(message.content)]));
     const rounds = threadRounds(record.localThread, record.pendingThread);
-    const activeRoundId = record.pendingThread.roundId ?? rounds.at(-1)?.id;
     return rounds.map((round, index) => {
       const attached = round.status === 'attached';
       const exactCandidate = !attached && this.adapter && ['answer_ready', 'generating'].includes(round.status)
@@ -586,7 +613,7 @@ export class PendingBannerManager {
       // A completed active round is actionable even before capture. The user
       // click is what runs ensureRoundStaged and produces a precise
       // not-loaded/ambiguous error when extraction cannot proceed.
-      const stageable = !attached && round.id === activeRoundId && round.status === 'answer_ready' && !reliable &&
+      const stageable = !attached && round.persistenceStatus === 'not_captured' && round.status === 'answer_ready' && !reliable &&
         (!candidate || candidateReliable);
       return { id: round.id, index: index + 1, question: questions.get(round.id) ?? '问题内容不可用', attached,
         latest: index === rounds.length - 1, reliable, stageable, candidate, candidateReliable, status: round.status,
@@ -647,9 +674,18 @@ export class PendingBannerManager {
         const signature = `${candidate.fingerprint}:${candidate.streaming}`;
         if (this.candidateStates.get(id) !== signature) {
           this.candidateStates.set(id, signature);
+          const roundId = record.pendingThread.roundId;
+          const beforeStatus = roundId ? threadRounds(record.localThread).find((round) => round.id === roundId)?.status : undefined;
           void this.bridge.updateCandidateState(id, candidate.fingerprint, candidate.streaming).then((updated) => {
+            if (roundId) logWorkspaceRound({ threadId: record.localThread.id, roundId,
+              activeRoundId: updated.pendingThread.roundId, pendingId: id, trigger: 'answer_recognized', beforeStatus,
+              afterStatus: candidate.streaming ? 'generating' : 'answer_ready', phase: 'recognize_answer' });
             this.records.set(id, updated); this.render();
-          }).catch(() => undefined);
+          }).catch((error) => {
+            if (roundId) logWorkspaceRound({ threadId: record.localThread.id, roundId,
+              activeRoundId: record.pendingThread.roundId, pendingId: id, trigger: 'answer_recognized', beforeStatus,
+              afterStatus: beforeStatus, phase: 'recognize_answer', error });
+          });
         }
       } else {
         this.reliableCandidateIds.delete(id);

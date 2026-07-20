@@ -21,6 +21,7 @@ import type { SiteAdapter } from '../adapters/site-adapter';
 import { applyPointAskTheme } from './theme';
 import type { OperationAuthorizer } from './operation-authorizer';
 import { showOperationToast } from './operation-feedback';
+import { attachedRounds, questionForRound, threadRounds } from '../shared/thread-rounds';
 
 interface MountedThread {
   host: HTMLElement;
@@ -34,9 +35,14 @@ interface MountedThread {
 }
 
 let nextMessageId = 1;
+let nextRoundId = 1;
 
 function createMessageId(now: Date): string {
   return `pointask-message-${now.getTime()}-${nextMessageId++}`;
+}
+
+function createRoundId(now: Date): string {
+  return `pointask-round-${now.getTime()}-${nextRoundId++}`;
 }
 
 function toAnchor(data: SelectionData): TextAnchor {
@@ -142,6 +148,7 @@ export class InlineThreadManager {
       contextVersion: workspace?.contextState.contextVersion,
     });
     const threadTimestamp = this.now().toISOString();
+    const roundId = createRoundId(this.now());
     const pending = this.pendingThreads.create({
       anchor, question: trimmedQuestion, generatedPrompt, promptMode: mode,
       displayId, answerMode, workspaceId: workspace?.id,
@@ -155,17 +162,18 @@ export class InlineThreadManager {
         scrollY: window.scrollY,
         capturedAt: threadTimestamp,
       } : undefined,
+      roundId,
     });
     if (!pending) return null;
     const timestamp = this.now().toISOString();
     const userMessage: LocalMessage = {
       id: createMessageId(this.now()),
+      roundId,
       role: 'user',
       content: textBlocks(trimmedQuestion),
       attachedManually: false,
       createdAt: timestamp,
     };
-    pending.roundId = userMessage.id;
     const thread: LocalThread = {
       id: pending.id,
       displayId,
@@ -179,7 +187,7 @@ export class InlineThreadManager {
       sourceMessageFingerprint: data.messageFingerprint,
       messages: [...previousLocalMessages, userMessage],
       rounds: [{
-        id: userMessage.id, pendingId: pending.id, promptHash: pending.promptHash ?? stableTextHash(generatedPrompt),
+        id: roundId, questionMessageId: userMessage.id, pendingId: pending.id, promptHash: pending.promptHash ?? stableTextHash(generatedPrompt),
         assistantFingerprintsBefore: pending.assistantFingerprintsBefore ?? [], status: 'waiting_for_submission',
         persistenceStatus: 'not_captured',
         createdAt: timestamp, updatedAt: timestamp,
@@ -307,11 +315,11 @@ export class InlineThreadManager {
     if (!item) return;
     const viewportTop = item.host.getBoundingClientRect().top;
     const thread = item.thread;
-    const userRoundIds = thread.messages.filter((message) => message.role === 'user').map((message) => message.id);
-    const collapsed = new Set(thread.collapsedRoundIds ?? userRoundIds.slice(0, -1));
+    const visibleRoundIds = attachedRounds(thread).map((round) => round.id);
+    const collapsed = new Set(thread.collapsedRoundIds ?? visibleRoundIds.slice(0, -1));
     if (collapsed.has(roundId)) collapsed.delete(roundId);
     else collapsed.add(roundId);
-    const nextCollapsedRoundIds = [...collapsed].filter((messageId) => userRoundIds.includes(messageId));
+    const nextCollapsedRoundIds = [...collapsed].filter((visibleRoundId) => visibleRoundIds.includes(visibleRoundId));
     const timestamp = this.now().toISOString();
     item.thread = {
       ...thread,
@@ -474,8 +482,8 @@ export class InlineThreadManager {
     }
     this.pendingThreads.restore(record.pendingThread);
     const wasAttached = item.thread.status === 'answer_attached';
-    const previousLatestRoundId = [...item.thread.messages].reverse().find((message) => message.role === 'user')?.id;
-    const previousLatestHadAnswer = item.thread.messages.at(-1)?.role === 'assistant';
+    const previousAttached = attachedRounds(item.thread);
+    const previousLatestRoundId = previousAttached.at(-1)?.id;
     item.thread = record.localThread;
     if (item.thread.status !== 'failed') item.error = undefined;
     if (item.thread.answerMode === 'dedicated_branch' && record.targetConversationUrl) {
@@ -489,11 +497,11 @@ export class InlineThreadManager {
         updatedAt: this.now().toISOString(),
       }));
     }
-    const latestRoundId = [...item.thread.messages].reverse().find((message) => message.role === 'user')?.id;
-    const latestHasAnswer = item.thread.messages.at(-1)?.role === 'assistant';
-    if (latestRoundId && latestHasAnswer && (!previousLatestHadAnswer || previousLatestRoundId !== latestRoundId)) {
-      const userRoundIds = item.thread.messages.filter((message) => message.role === 'user').map((message) => message.id);
-      const collapsed = new Set(item.thread.collapsedRoundIds ?? userRoundIds.slice(0, -1));
+    const currentAttached = attachedRounds(item.thread);
+    const latestRoundId = currentAttached.at(-1)?.id;
+    if (latestRoundId && previousLatestRoundId !== latestRoundId) {
+      const attachedRoundIds = currentAttached.map((round) => round.id);
+      const collapsed = new Set(item.thread.collapsedRoundIds ?? attachedRoundIds.slice(0, -1));
       collapsed.delete(latestRoundId);
       item.thread = { ...item.thread, collapsedRoundIds: [...collapsed] };
     }
@@ -548,18 +556,25 @@ export class InlineThreadManager {
       contextVersion: workspace?.contextState.contextVersion,
     });
     const timestamp = this.now().toISOString();
+    const roundId = createRoundId(this.now());
     const questionMessage: LocalMessage = {
       id: createMessageId(this.now()),
+      roundId,
       role: 'user',
       content: textBlocks(trimmedQuestion),
       attachedManually: false,
       createdAt: timestamp,
     };
-    const pending = this.pendingThreads.prepareNext(id, trimmedQuestion, generatedPrompt, 'compact', this.siteAdapter?.getAssistantMessageFingerprints(), questionMessage.id);
+    const pending = this.pendingThreads.prepareNext(id, trimmedQuestion, generatedPrompt, 'compact', this.siteAdapter?.getAssistantMessageFingerprints(), roundId);
     if (!pending) return false;
     item.thread = {
       ...item.thread,
       messages: [...item.thread.messages, questionMessage],
+      rounds: [...threadRounds(item.thread, currentPending), {
+        id: roundId, questionMessageId: questionMessage.id, pendingId: pending.id,
+        promptHash: pending.promptHash ?? stableTextHash(generatedPrompt), assistantFingerprintsBefore: pending.assistantFingerprintsBefore ?? [],
+        status: 'waiting_for_submission', persistenceStatus: 'not_captured', createdAt: timestamp, updatedAt: timestamp,
+      }],
       status: 'waiting_for_submission',
       updatedAt: timestamp,
     };
@@ -586,8 +601,10 @@ export class InlineThreadManager {
     const item = this.mounted.get(id);
     const pending = this.pendingThreads.get(id);
     if (!item || !pending) return false;
-    const start = item.thread.messages.findIndex((message) => message.id === userMessageId && message.role === 'user');
+    const mappedQuestionId = questionForRound(item.thread, userMessageId)?.id ?? userMessageId;
+    const start = item.thread.messages.findIndex((message) => message.id === mappedQuestionId && message.role === 'user');
     if (start < 0) return false;
+    const removedRoundId = item.thread.messages[start]?.roundId ?? item.thread.rounds?.find((round) => round.questionMessageId === userMessageId)?.id;
     const nextUser = item.thread.messages.findIndex((message, index) => index > start && message.role === 'user');
     const end = nextUser < 0 ? item.thread.messages.length : nextUser;
     const messages = [...item.thread.messages.slice(0, start), ...item.thread.messages.slice(end)];
@@ -600,11 +617,13 @@ export class InlineThreadManager {
     item.thread = {
       ...item.thread,
       messages,
+      rounds: removedRoundId ? item.thread.rounds?.filter((round) => round.id !== removedRoundId) : item.thread.rounds,
       status: messages.at(-1)?.role === 'assistant' ? 'answer_attached' : 'waiting_for_answer',
       updatedAt: timestamp,
     };
     const collapsed = new Set(item.thread.collapsedRoundIds ?? []);
     collapsed.delete(userMessageId);
+    if (removedRoundId) collapsed.delete(removedRoundId);
     const latestRoundId = messages.filter((message) => message.role === 'user').at(-1)?.id;
     if (latestRoundId) collapsed.delete(latestRoundId);
     item.thread.collapsedRoundIds = hadExplicitState ? [...collapsed] : undefined;
@@ -700,7 +719,8 @@ export class InlineThreadManager {
     if (!item?.host.isConnected) return false;
     const timestamp = this.now().toISOString();
     this.expandedIds.add(id);
-    const collapsed = new Set(item.thread.collapsedRoundIds ?? []); if (roundId) collapsed.delete(roundId);
+    const questionMessageId = roundId ? threadRounds(item.thread).find((round) => round.id === roundId)?.questionMessageId ?? roundId : undefined;
+    const collapsed = new Set(item.thread.collapsedRoundIds ?? []); if (questionMessageId) collapsed.delete(questionMessageId);
     item.thread = { ...item.thread, expanded: true, collapsedRoundIds: item.thread.collapsedRoundIds || roundId ? [...collapsed] : undefined, updatedAt: timestamp };
     void this.threadStore?.upsert(item.thread); this.render(id);
     item.host.classList.add('pointask-thread-highlight');

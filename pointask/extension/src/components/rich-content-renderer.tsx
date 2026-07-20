@@ -8,14 +8,18 @@ import { normalizeRichContentBlocks } from '../shared/rich-content';
 
 const katexAssetBase = typeof chrome !== 'undefined' && chrome.runtime?.getURL ? chrome.runtime.getURL('assets/') : '/assets/';
 export const richContentStyles = `${katexCss.replaceAll('url(/assets/', `url(${katexAssetBase}`)}
-.pointask-rich-content { max-width: 100%; overflow-wrap: anywhere; line-height: 1.65; }
+.pointask-rich-content { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; overflow-wrap: anywhere; line-height: 1.65; }
+.pointask-rich-content > *, .pointask-rich-content .pointask-markdown-block,
+.pointask-rich-content :where(p, ul, ol, li, blockquote, h1, h2, h3, h4, h5, h6) {
+  box-sizing: border-box; max-width: 100%; min-width: 0; overflow-wrap: anywhere;
+}
 .pointask-rich-content .pointask-markdown-block { margin: 6px 0; }
 .pointask-rich-content .pointask-markdown-block:first-child { margin-top: 0; }
 .pointask-rich-content .pointask-markdown-block:last-child { margin-bottom: 0; }
 .pointask-rich-content :where(h1, h2, h3, h4, h5, h6) { margin: .8em 0 .35em; line-height: 1.3; }
 .pointask-rich-content h1 { font-size: 1.45em; } .pointask-rich-content h2 { font-size: 1.3em; } .pointask-rich-content h3 { font-size: 1.15em; }
 .pointask-rich-content :where(p, ul, ol, blockquote) { margin: .55em 0; }
-.pointask-rich-content :where(ul, ol) { padding-left: 1.5em; }
+.pointask-rich-content :where(ul, ol) { width: 100%; padding-left: 1.5em; }
 .pointask-rich-content li + li { margin-top: .2em; }
 .pointask-rich-content li > p { margin: .2em 0; }
 .pointask-rich-content li::marker { color: var(--pa-text, currentColor); }
@@ -27,15 +31,15 @@ export const richContentStyles = `${katexCss.replaceAll('url(/assets/', `url(${k
 .pointask-rich-content input[type="checkbox"] { margin: 0 .45em 0 0; vertical-align: -.08em; accent-color: var(--pa-accent, #10a37f); }
 .pointask-rich-content blockquote { padding: .15em .7em; border-left: 2px solid var(--pa-border, #9aa0a6); color: var(--pa-muted, #666); }
 .pointask-rich-content a { color: var(--pa-accent, #0969da); text-decoration: underline; }
-.pointask-rich-content .pointask-table-scroll { max-width: 100%; overflow-x: auto; margin: .65em 0; }
+.pointask-rich-content .pointask-table-scroll { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; margin: .65em 0; }
 .pointask-rich-content table { width: max-content; min-width: min(100%, 360px); border-collapse: collapse; }
 .pointask-rich-content :where(th, td) { padding: 5px 8px; border: 1px solid var(--pa-border, #d0d7de); text-align: left; }
 .pointask-rich-content th { background: var(--pa-bg-subtle, #f3f4f6); }
-.pointask-rich-content code { border-radius: 5px; padding: .12em .3em; background: var(--pa-bg-subtle, #eff1f3); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: .875em; }
+.pointask-rich-content code { max-width: 100%; overflow-wrap: anywhere; border-radius: 5px; padding: .12em .3em; background: var(--pa-bg-subtle, #eff1f3); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: .875em; }
 .pointask-rich-content .pointask-inline-math { display: inline-block; max-width: 100%; vertical-align: middle; }
 .pointask-rich-content .pointask-block-math { display: block; max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
 .pointask-rich-content .katex, .pointask-rich-content .katex * { white-space: nowrap; }
-.pointask-rich-content pre { box-sizing: border-box; max-width: 100%; overflow: auto; margin: .75em 0; padding: 12px 14px; border: 1px solid var(--pa-border, #dedee3); border-radius: 8px; color: var(--pa-text, #202123); background: var(--pa-bg-subtle, #f7f7f8); direction: ltr; text-align: left; white-space: pre; tab-size: 4; }
+.pointask-rich-content pre { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; overflow-y: hidden; margin: .75em 0; padding: 12px 14px; border: 1px solid var(--pa-border, #dedee3); border-radius: 8px; color: var(--pa-text, #202123); background: var(--pa-bg-subtle, #f7f7f8); direction: ltr; text-align: left; white-space: pre; tab-size: 4; }
 .pointask-rich-content pre code { display: block; min-width: max-content; padding: 0; color: inherit; background: transparent; font-size: .875em; line-height: 1.55; white-space: pre; overflow-wrap: normal; }
 .pointask-rich-content del { color: #656d76; }
 `;
