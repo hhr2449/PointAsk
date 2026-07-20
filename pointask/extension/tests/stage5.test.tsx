@@ -561,6 +561,46 @@ describe('manual answer confirmation and storage', () => {
     act(() => manager.stop());
   });
 
+  it('captures the recorded answer by fingerprint when its preceding prompt has been virtualized', async () => {
+    document.body.innerHTML = chatGptFixture;
+    const adapter = new ChatGptAdapter();
+    const answer = document.querySelector<HTMLElement>('[data-testid="conversation-turn-2"]')!;
+    const fingerprint = adapter.getMessageFingerprint(answer);
+    const base = association('workspace-remembered-answer').record;
+    const roundId = base.localThread.messages[0]!.id;
+    let current: PendingAssociation = { ...base, targetConversationUrl: window.location.href,
+      pendingThread: { ...base.pendingThread, threadId: base.localThread.id, roundId: undefined, answerMode: 'workspace',
+        promptHash: 'remembered-hash', candidateAnswerFingerprint: fingerprint, status: 'answer_ready', targetConversationUrl: window.location.href },
+      localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready', targetConversationUrl: window.location.href,
+        rounds: [{ id: roundId, pendingId: base.pendingThread.id, promptHash: 'remembered-hash', assistantFingerprintsBefore: [],
+          candidateAnswerFingerprint: fingerprint, status: 'answer_ready', persistenceStatus: 'not_captured',
+          createdAt: base.createdAt, updatedAt: base.updatedAt }] } };
+    vi.spyOn(adapter, 'findCandidateAnswer').mockReturnValue(null);
+    vi.spyOn(adapter, 'findAssistantMessageByFingerprint').mockReturnValue(answer);
+    const sendMessage = vi.fn().mockImplementation((message: { type: string }) => {
+      if (message.type === 'pointask:stage-round-answer') current = { ...current, localThread: { ...current.localThread,
+        rounds: current.localThread.rounds?.map((round) => ({ ...round, persistenceStatus: 'staged' as const,
+          stagedAnswer: [{ type: 'text' as const, content: '唯一记录的回答' }], answerSource: {
+            conversationUrl: window.location.href, conversationKey: window.location.href, messageFingerprint: fingerprint,
+          } })) } };
+      return Promise.resolve({ ok: true, data: current });
+    });
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }),
+      new ClipboardManager(undefined, () => false), adapter);
+    await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
+    const internal = manager as unknown as {
+      resolveWorkspaceRounds(record: PendingAssociation): Array<{ candidateReliable: boolean }>;
+      captureCurrentWorkspaceRound(record: PendingAssociation, round: unknown): Promise<{ ok: boolean }>;
+    };
+    const resolved = internal.resolveWorkspaceRounds(current)[0]!;
+    expect(resolved.candidateReliable).toBe(true);
+    let captured = { ok: false };
+    await act(async () => { captured = await internal.captureCurrentWorkspaceRound(current, resolved); });
+    expect(captured.ok).toBe(true);
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'pointask:stage-round-answer', roundId }));
+    act(() => manager.stop());
+  });
+
   it('keeps the question when staging fails and continues only after the explicit skip action', async () => {
     document.body.innerHTML = '<main></main>';
     const adapter = new ChatGptAdapter(); const base = association('workspace-stage-failed').record;

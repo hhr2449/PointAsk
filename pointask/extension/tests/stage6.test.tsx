@@ -228,6 +228,23 @@ describe('conversation association conflicts and restoration', () => {
     expect(attached.localThread.messages.filter((message) => message.role === 'assistant')).toHaveLength(1);
   });
 
+  it('stages a legacy active Workspace round whose pending record has no roundId', () => {
+    const coordinator = new PendingAssociationCoordinator(() => new Date(timestamp));
+    const value = { ...pending('workspace-legacy-stage'), threadId: 'workspace-legacy-stage', roundId: undefined,
+      answerMode: 'workspace' as const, promptHash: 'legacy-stage-hash', status: 'answer_ready' as const,
+      targetConversationUrl: 'https://chatgpt.com/c/shared' };
+    const local: LocalThread = { ...attachedThread('workspace-legacy-stage'), answerMode: 'workspace', status: 'answer_ready',
+      messages: [{ id: 'legacy-q1', role: 'user', content: [{ type: 'text', content: '旧线程问题' }],
+        attachedManually: false, createdAt: timestamp }], rounds: undefined };
+    coordinator.create(value, 1, local); coordinator.markTargetOpened(value.id, 20, 'https://chatgpt.com/c/shared');
+    const locator = { conversationUrl: 'https://chatgpt.com/c/shared', conversationKey: 'https://chatgpt.com/c/shared',
+      messageFingerprint: 'legacy-answer' };
+    const staged = coordinator.stageRoundAnswer(value.id, 20, 'legacy-q1', 'legacy-stage-hash',
+      'https://chatgpt.com/c/shared', false, [{ type: 'text', content: '旧线程回答' }], locator);
+    expect(staged?.localThread.rounds?.[0]).toMatchObject({ id: 'legacy-q1', persistenceStatus: 'staged',
+      stagedAnswer: [{ type: 'text', content: '旧线程回答' }] });
+  });
+
   it('keeps staged answers isolated between two PA threads in one Workspace', () => {
     const coordinator = new PendingAssociationCoordinator(() => new Date(timestamp));
     for (const [id, roundId] of [['stage-one', 'q-one'], ['stage-two', 'q-two']] as const) {

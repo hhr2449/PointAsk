@@ -340,4 +340,26 @@ describe('view anchor and migration', () => {
     expect(first.threads[0]?.rounds?.[0]).toMatchObject({ persistenceStatus: 'staged', stagedAnswer: [{ type: 'text', content: '暂存回答' }] });
     expect(migrateStorage({ [STORAGE_KEYS.threads]: first.threads })).toEqual(first);
   });
+
+  it('backfills the active round id for pre-staging Workspace pending records', () => {
+    const createdAt = '2026-01-01T00:00:00.000Z';
+    const anchor = { pageUrl: 'https://chatgpt.com/c/source', sourcePageUrl: 'https://chatgpt.com/c/source',
+      conversationKey: 'https://chatgpt.com/c/source', messageFingerprint: 'source-message', assistantMessageHash: 'source-message',
+      selectedText: '选区', prefixText: '', suffixText: '', paragraphText: '段落', paragraphHash: 'paragraph', startOffset: 0,
+      endOffset: 2, schemaVersion: 1, createdAt };
+    const thread = { id: 'legacy-workspace', displayId: 'PA-003', answerMode: 'workspace', anchor,
+      sourcePageUrl: anchor.sourcePageUrl, sourceConversationKey: anchor.conversationKey, sourceMessageFingerprint: anchor.messageFingerprint,
+      targetConversationUrl: 'https://chatgpt.com/c/workspace', messages: [
+        { id: 'q1', role: 'user', content: [{ type: 'text', content: '第一问' }], attachedManually: false, createdAt },
+        { id: 'q2', role: 'user', content: [{ type: 'text', content: '第二问' }], attachedManually: false, createdAt },
+      ], status: 'answer_ready', createdAt, updatedAt: createdAt };
+    const pending = { id: 'legacy-pending', threadId: thread.id, sourcePageUrl: anchor.sourcePageUrl,
+      sourceConversationKey: anchor.conversationKey, sourceMessageFingerprint: anchor.messageFingerprint, anchor, question: '第二问',
+      generatedPrompt: '第二轮提示词', promptMode: 'compact', promptHash: stableTextHash('第二轮提示词'), assistantFingerprintsBefore: [],
+      status: 'answer_ready', createdAt, updatedAt: createdAt, targetConversationUrl: thread.targetConversationUrl,
+      displayId: thread.displayId, answerMode: 'workspace' };
+    const migrated = migrateStorage({ [STORAGE_KEYS.threads]: [thread], [STORAGE_KEYS.pendingThreads]: [pending],
+      [STORAGE_KEYS.schemaVersion]: 8 });
+    expect(migrated.pendingThreads[0]?.roundId).toBe('q2');
+  });
 });

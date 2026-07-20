@@ -457,8 +457,9 @@ export class PendingBannerManager {
       this.errors.set(id, message); this.render();
       return { ok: false, captureFailed: true, error: `当前回答暂存失败：${message}` };
     };
+    const activeRoundId = record.pendingThread.roundId ?? threadRounds(record.localThread, record.pendingThread).at(-1)?.id;
     if (record.localThread.id !== (record.pendingThread.threadId || record.pendingThread.id) ||
-      round.id !== record.pendingThread.roundId || round.status !== 'answer_ready') return fail('轮次状态已变化');
+      round.id !== activeRoundId || round.status !== 'answer_ready') return fail('轮次状态已变化');
     if (!record.targetConversationUrl || !isCompatibleChatGptTargetUrl(record.targetConversationUrl, window.location.href)) return fail('当前页面不是目标 Workspace');
     if (!round.candidate) return fail(round.knownAnswerFingerprint || round.answerLocator
       ? '回答当前未加载，请滚动加载后重试' : '无法唯一匹配当前回答');
@@ -490,10 +491,15 @@ export class PendingBannerManager {
         ? this.adapter?.findAssistantMessageByFingerprint(round.candidateAnswerFingerprint) : null;
       const candidate = exactCandidate ?? (rememberedElement ? { element: rememberedElement, fingerprint: round.candidateAnswerFingerprint!,
         streaming: this.adapter?.isMessageStreaming(rememberedElement) ?? false } : undefined);
-      const sharedWithOtherThread = Boolean(exactCandidate && [...this.candidates].some(([pendingId, other]) =>
-        pendingId !== record.pendingThread.id && other.fingerprint === exactCandidate.fingerprint));
-      const candidateReliable = Boolean(exactCandidate && !exactCandidate.streaming && !sharedWithOtherThread && (!round.candidateAnswerFingerprint ||
-        round.candidateAnswerFingerprint === exactCandidate.fingerprint));
+      const sharedWithOtherThread = Boolean(candidate && [...this.candidates].some(([pendingId, other]) =>
+        pendingId !== record.pendingThread.id && other.fingerprint === candidate.fingerprint));
+      // Once the strict prompt matcher has persisted a fingerprint for this
+      // round, that stable fingerprint remains authoritative while its answer
+      // element is loaded. The preceding user turn may be virtualized away,
+      // making findCandidateAnswer() temporarily unable to repeat the original
+      // adjacency proof even though this is still the same recorded answer.
+      const candidateReliable = Boolean(candidate && !candidate.streaming && !sharedWithOtherThread && (exactCandidate ||
+        Boolean(round.candidateAnswerFingerprint && round.candidateAnswerFingerprint === candidate.fingerprint)));
       const stagedAnswer = round.persistenceStatus === 'staged' ? round.stagedAnswer : undefined;
       const reliable = Boolean(stagedAnswer && isRichContent(stagedAnswer) && round.answerSource?.messageFingerprint);
       return { id: round.id, index: index + 1, question: questions.get(round.id) ?? '问题内容不可用', attached,

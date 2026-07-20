@@ -74,12 +74,18 @@ export function migrateStorage(raw: Record<string, unknown>): PointAskStorageSch
       const item = record(value); if (!item) return null;
       const thread = threads.find((candidate) => candidate.id === (item.threadId ?? item.id));
       if (!thread) return item;
+      const roundId = typeof item.roundId === 'string' && item.roundId
+        ? item.roundId
+        : thread.rounds?.find((round) => round.pendingId === item.id)?.id
+          ?? thread.rounds?.at(-1)?.id
+          ?? [...thread.messages].reverse().find((message) => message.role === 'user')?.id;
       return {
         ...item,
         displayId: item.displayId ?? thread.displayId,
         answerMode: item.answerMode ?? thread.answerMode,
         workspaceId: item.workspaceId ?? thread.workspaceId,
         threadId: item.threadId ?? thread.id,
+        ...(roundId ? { roundId } : {}),
         promptHash: typeof item.promptHash === 'string' && item.promptHash ? item.promptHash : stableTextHash(String(item.generatedPrompt ?? '')),
         assistantFingerprintsBefore: Array.isArray(item.assistantFingerprintsBefore) ? item.assistantFingerprintsBefore : [],
       };

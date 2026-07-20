@@ -251,10 +251,11 @@ export class PendingAssociationCoordinator {
   stageRoundAnswer(id: string, targetTabId: number, roundId: string, promptHash: string, targetUrl: string,
     captureFailed: boolean, richContent?: RichContentBlock[], answerSource?: AnswerSourceLocator): PendingAssociation | null {
     const record = this.get(id);
+    const rounds = record ? threadRounds(record.localThread, record.pendingThread) : [];
+    const activeRoundId = record?.pendingThread.roundId ?? rounds.at(-1)?.id;
     if (!record || record.targetTabId !== targetTabId || record.associationStatus === 'cancelled' ||
-      record.pendingThread.id !== id || record.pendingThread.roundId !== roundId || record.pendingThread.promptHash !== promptHash ||
+      record.pendingThread.id !== id || activeRoundId !== roundId || record.pendingThread.promptHash !== promptHash ||
       !record.targetConversationUrl || !isCompatibleChatGptTargetUrl(record.targetConversationUrl, targetUrl)) return null;
-    const rounds = threadRounds(record.localThread, record.pendingThread);
     const current = rounds.find((round) => round.id === roundId);
     if (!current || current.pendingId !== id || current.promptHash !== promptHash || current.persistenceStatus === 'attached') return null;
     if (current.persistenceStatus === 'staged' && !captureFailed) return record;
