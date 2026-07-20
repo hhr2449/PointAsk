@@ -39,7 +39,10 @@ export class PendingAssociationCoordinator {
       pendingThread,
       localThread,
       sourceTabId,
-      targetTabId: existing?.targetTabId ?? pendingThread.targetTabId,
+      // tabId is a process-local binding. Never revive a persisted tab ID
+      // after a service-worker restart; the stable conversation URL is used
+      // to locate or reopen the target instead.
+      targetTabId: existing?.targetTabId,
       targetConversationUrl: localThread.targetConversationUrl,
       associationStatus: existing?.associationStatus ?? (localThread.status === 'answer_attached' ? 'completed' : localThread.targetConversationUrl ? 'associated' : 'created'),
       createdAt: existing?.createdAt ?? localThread.createdAt,
@@ -270,6 +273,27 @@ export class PendingAssociationCoordinator {
     return [...this.records.values()].filter((record) =>
       record.sourceTabId === tabId && record.associationStatus !== 'cancelled',
     );
+  }
+
+  clearTargetTab(tabId: number): PendingAssociation[] {
+    const updated: PendingAssociation[] = [];
+    for (const [id, record] of this.records) {
+      if (record.targetTabId !== tabId) continue;
+      const { targetTabId: _pendingTabId, ...pendingThread } = record.pendingThread;
+      void _pendingTabId;
+      const shouldRetry = pendingThread.submittedPromptHash !== pendingThread.promptHash &&
+        (pendingThread.status === 'waiting_for_submission' || record.localThread.status === 'waiting_for_submission');
+      const next: PendingAssociation = {
+        ...record,
+        pendingThread: { ...pendingThread, status: shouldRetry ? 'failed' : pendingThread.status },
+        localThread: { ...record.localThread, status: shouldRetry ? 'failed' : record.localThread.status },
+        targetTabId: undefined,
+        associationStatus: record.targetConversationUrl ? 'associated' : 'created',
+        updatedAt: this.now().toISOString(),
+      };
+      this.records.set(id, next); updated.push(next);
+    }
+    return updated;
   }
 
   private update(id: string, changes: Partial<PendingAssociation>): PendingAssociation | null {

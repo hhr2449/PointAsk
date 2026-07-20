@@ -22,7 +22,7 @@ export function showAttachmentUndo(
 ): void {
   [...document.querySelectorAll<HTMLElement>('pointask-operation-feedback')]
     .find((item) => item.dataset.pointaskThreadId === record.pendingThread.id)?.remove();
-  const { host, box } = toastHost('回答已附加'); host.dataset.pointaskThreadId = record.pendingThread.id;
+  const { host, box } = toastHost(`已附加到 ${record.localThread.displayId}`); host.dataset.pointaskThreadId = record.pendingThread.id;
   const undo = document.createElement('button'); undo.type = 'button'; undo.textContent = '撤销';
   const timer = setTimeout(() => host.remove(), 5_000);
   undo.addEventListener('click', () => { clearTimeout(timer); void bridge.undoAttachment(record.pendingThread.id).then((updated) => { host.remove(); onUndo(updated); }); });

@@ -23,6 +23,7 @@ export interface PendingAssociation {
 export type PointAskRuntimeMessage =
   | { type: 'pointask:create-pending-thread'; pendingThread: PendingThread; localThread?: LocalThread }
   | { type: 'pointask:open-target-chat'; pendingThreadId: string }
+  | { type: 'pointask:open-or-auto-send-workspace'; pendingThreadId: string; promptHash: string; attemptId: string }
   | { type: 'pointask:associate-target-page'; pendingThreadId: string; targetUrl: string; confirmReassociation?: boolean }
   | { type: 'pointask:pending-thread-updated'; pendingThreadId: string; action: 'manual-branch' | 'return-source' }
   | { type: 'pointask:cancel-pending-thread'; pendingThreadId: string }
@@ -34,23 +35,18 @@ export type PointAskRuntimeMessage =
   | { type: 'pointask:get-source-threads'; conversationKey: string }
   | { type: 'pointask:navigate-to-answer'; threadId: string; locator: AnswerSourceLocator }
   | { type: 'pointask:get-pending-navigation'; currentUrl: string }
+  | { type: 'pointask:get-pending-thread-return'; currentUrl: string }
   | { type: 'pointask:complete-navigation'; navigationId: string }
   | { type: 'pointask:undo-attachment'; pendingThreadId: string }
   | { type: 'pointask:candidate-answer-state'; pendingThreadId: string; fingerprint: string; streaming: boolean }
   | { type: 'pointask:open-workspace-context-update'; workspaceId: string }
   | { type: 'pointask:reserve-prompt-submission'; pendingThreadId: string; promptHash: string; targetUrl: string }
-  | { type: 'pointask:release-prompt-submission'; pendingThreadId: string; promptHash: string }
-  | { type: 'pointask:send-pending-prompt'; pendingThreadId: string };
-
-export interface ExecutePendingSendMessage {
-  type: 'pointask:execute-pending-send';
-  pendingThreadId: string;
-  record: PendingAssociation;
-}
+  | { type: 'pointask:release-prompt-submission'; pendingThreadId: string; promptHash: string };
 
 const messageTypes = new Set([
   'pointask:create-pending-thread',
   'pointask:open-target-chat',
+  'pointask:open-or-auto-send-workspace',
   'pointask:associate-target-page',
   'pointask:pending-thread-updated',
   'pointask:cancel-pending-thread',
@@ -62,13 +58,13 @@ const messageTypes = new Set([
   'pointask:get-source-threads',
   'pointask:navigate-to-answer',
   'pointask:get-pending-navigation',
+  'pointask:get-pending-thread-return',
   'pointask:complete-navigation',
   'pointask:undo-attachment',
   'pointask:candidate-answer-state',
   'pointask:open-workspace-context-update',
   'pointask:reserve-prompt-submission',
   'pointask:release-prompt-submission',
-  'pointask:send-pending-prompt',
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -142,6 +138,9 @@ export function isPointAskRuntimeMessage(value: unknown): value is PointAskRunti
     case 'pointask:open-answer-page':
     case 'pointask:unlink-target-page':
       return hasOnlyKeys(value, ['type', 'pendingThreadId']) && isNonEmptyString(value.pendingThreadId);
+    case 'pointask:open-or-auto-send-workspace':
+      return hasOnlyKeys(value, ['type', 'pendingThreadId', 'promptHash', 'attemptId']) &&
+        isNonEmptyString(value.pendingThreadId) && isNonEmptyString(value.promptHash) && isNonEmptyString(value.attemptId);
     case 'pointask:open-workspace-context-update':
       return hasOnlyKeys(value, ['type', 'workspaceId']) && isNonEmptyString(value.workspaceId);
     case 'pointask:reserve-prompt-submission':
@@ -149,8 +148,6 @@ export function isPointAskRuntimeMessage(value: unknown): value is PointAskRunti
         isNonEmptyString(value.promptHash) && isNonEmptyString(value.targetUrl) && isChatGptUrl(value.targetUrl);
     case 'pointask:release-prompt-submission':
       return hasOnlyKeys(value, ['type', 'pendingThreadId', 'promptHash']) && isNonEmptyString(value.pendingThreadId) && isNonEmptyString(value.promptHash);
-    case 'pointask:send-pending-prompt':
-      return hasOnlyKeys(value, ['type', 'pendingThreadId']) && isNonEmptyString(value.pendingThreadId);
     case 'pointask:associate-target-page':
       return hasOnlyKeys(value, ['type', 'pendingThreadId', 'targetUrl', 'confirmReassociation']) &&
         isNonEmptyString(value.pendingThreadId) && isNonEmptyString(value.targetUrl) && isChatGptUrl(value.targetUrl) &&
@@ -171,6 +168,7 @@ export function isPointAskRuntimeMessage(value: unknown): value is PointAskRunti
     case 'pointask:navigate-to-answer':
       return hasOnlyKeys(value, ['type', 'threadId', 'locator']) && isNonEmptyString(value.threadId) && isAnswerSource(value.locator);
     case 'pointask:get-pending-navigation':
+    case 'pointask:get-pending-thread-return':
       return hasOnlyKeys(value, ['type', 'currentUrl']) && isNonEmptyString(value.currentUrl) && isChatGptUrl(value.currentUrl);
     case 'pointask:complete-navigation':
       return hasOnlyKeys(value, ['type', 'navigationId']) && isNonEmptyString(value.navigationId);
@@ -278,18 +276,12 @@ export function isPendingAssociationUpdate(value: unknown): value is {
     isNonEmptyString(record.createdAt) && isNonEmptyString(record.updatedAt);
 }
 
-export function isExecutePendingSendMessage(value: unknown): value is ExecutePendingSendMessage {
-  return isRecord(value) && value.type === 'pointask:execute-pending-send' && hasOnlyKeys(value, ['type', 'pendingThreadId', 'record']) &&
-    isNonEmptyString(value.pendingThreadId) && isPendingAssociationUpdate({ type: 'pointask:pending-thread-updated', record: value.record }) &&
-    (value.record as PendingAssociation).pendingThread.id === value.pendingThreadId;
-}
-
 export function isLocalThread(value: unknown): value is LocalThread {
   if (!isRecord(value) || !isRecord(value.anchor) || !Array.isArray(value.messages)) return false;
   const anchor = value.anchor;
   if (!hasOnlyKeys(value, [
     'id', 'anchor', 'sourcePageUrl', 'sourceConversationKey', 'sourceMessageFingerprint', 'targetConversationUrl',
-    'messages', 'status', 'createdAt', 'updatedAt', 'expanded', 'displayId', 'answerMode', 'workspaceId',
+    'messages', 'status', 'createdAt', 'updatedAt', 'expanded', 'collapsedRoundIds', 'displayId', 'answerMode', 'workspaceId',
     'dedicatedConversationUrl', 'richSelection',
   ])) return false;
   if (!['id', 'sourcePageUrl', 'sourceConversationKey', 'sourceMessageFingerprint', 'createdAt', 'updatedAt', 'displayId', 'answerMode']
@@ -306,6 +298,7 @@ export function isLocalThread(value: unknown): value is LocalThread {
   if (!['workspace', 'current_conversation', 'dedicated_branch'].includes(String(value.answerMode))) return false;
   if (!/^PA-\d{3,}$/.test(String(value.displayId)) || (value.workspaceId !== undefined && !isNonEmptyString(value.workspaceId))) return false;
   if (value.expanded !== undefined && typeof value.expanded !== 'boolean') return false;
+  if (value.collapsedRoundIds !== undefined && (!Array.isArray(value.collapsedRoundIds) || !value.collapsedRoundIds.every(isNonEmptyString))) return false;
   if (!isChatGptUrl(value.sourcePageUrl as string) || !isChatGptUrl(value.sourceConversationKey as string)) return false;
   if (!isChatGptUrl(anchor.sourcePageUrl as string) || !isChatGptUrl(anchor.conversationKey as string) ||
     value.sourcePageUrl !== anchor.sourcePageUrl || value.sourceConversationKey !== anchor.conversationKey ||

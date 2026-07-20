@@ -44,7 +44,8 @@ describe('source card live recovery', () => {
     expect(shadow?.querySelector('.pointask-toggle')?.getAttribute('aria-expanded')).toBe('false');
     expect(shadow?.textContent).toContain('继续追问'); expect(shadow?.textContent).toContain('2 轮');
     expect(shadow?.querySelectorAll('.pointask-primary-action')).toHaveLength(1);
-    expect(shadow?.querySelector('.pointask-summary')?.textContent).toContain('为什么？');
+    expect(shadow?.querySelector('.pointask-summary')?.textContent).toContain('PA-001');
+    expect(shadow?.querySelector('.pointask-summary')?.textContent).toContain('2 轮');
   });
 
   it('replaces an already-mounted waiting card with persisted attached data', async () => {
@@ -206,6 +207,7 @@ describe('source card live recovery', () => {
     let revealed = false; await act(() => { revealed = manager.reveal(waiting.id); }); expect(revealed).toBe(true);
     await vi.waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'center' }));
     expect(host.shadowRoot?.querySelector('.pointask-toggle')?.getAttribute('aria-expanded')).toBe('true');
+    expect(host.classList.contains('pointask-thread-highlight')).toBe(true);
   });
 
 });

@@ -97,7 +97,7 @@ describe('attachment selection entry', () => {
 });
 
 describe('manual answer confirmation and storage', () => {
-  it('waits for the target composer and sends without a second authorization prompt', async () => {
+  it('waits for the target composer and sends only after the explicit target-page action is authorized', async () => {
     const workspace = association('workspace-auto-send').record;
     const promptHash = 'workspace-prompt-hash';
     const record = { ...workspace,
@@ -106,21 +106,93 @@ describe('manual answer confirmation and storage', () => {
     };
     const sendMessage = vi.fn().mockResolvedValue({ ok: true, data: record });
     const adapter = new ChatGptAdapter();
-    const fillComposer = vi.spyOn(adapter, 'fillComposer').mockReturnValueOnce(false).mockReturnValue(true);
-    vi.spyOn(adapter, 'canSubmitComposer').mockReturnValue(true);
+    vi.spyOn(adapter, 'waitForComposerReady').mockResolvedValue(true);
+    vi.spyOn(adapter, 'waitForSubmitReady').mockResolvedValue(true);
+    const fillComposer = vi.spyOn(adapter, 'fillComposer').mockReturnValue(true);
     const submitComposer = vi.spyOn(adapter, 'submitComposer').mockReturnValue(true);
-    const authorize = vi.fn().mockResolvedValue(false);
+    const hasSubmittedPrompt = vi.spyOn(adapter, 'hasSubmittedPrompt').mockReturnValueOnce(false).mockReturnValue(true);
+    const authorize = vi.fn().mockResolvedValue(true);
     const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }), new ClipboardManager(undefined, () => false), adapter, { authorize } as never);
     act(() => manager.applyRecord(record));
-    const execute = manager as unknown as { fill(id: string, skipAuthorization: boolean): Promise<boolean> };
+    expect(document.querySelector('pointask-pending-thread-banner')?.shadowRoot?.textContent)
+      .toContain('点击下方按钮后才会填入并发送');
+    expect(fillComposer).not.toHaveBeenCalled();
+    expect(submitComposer).not.toHaveBeenCalled();
+    const execute = manager as unknown as { fill(id: string): Promise<boolean> };
     let success = false;
-    await act(async () => { success = await execute.fill(record.pendingThread.id, true); });
+    await act(async () => { success = await execute.fill(record.pendingThread.id); });
     expect(success).toBe(true);
-    expect(fillComposer).toHaveBeenCalledTimes(2);
+    expect(fillComposer).toHaveBeenCalledOnce();
     expect(submitComposer).toHaveBeenCalledOnce();
-    expect(authorize).not.toHaveBeenCalled();
+    expect(hasSubmittedPrompt).toHaveBeenCalledWith(promptHash);
+    expect(authorize).toHaveBeenCalledOnce();
     expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'pointask:reserve-prompt-submission', pendingThreadId: record.pendingThread.id }));
     act(() => manager.stop());
+  });
+
+  it('coalesces consecutive send attempts so the target button is clicked once', async () => {
+    const workspace = association('workspace-double-click').record;
+    const promptHash = 'workspace-double-click-hash';
+    const record = { ...workspace,
+      pendingThread: { ...workspace.pendingThread, answerMode: 'workspace' as const, promptHash },
+      localThread: { ...workspace.localThread, answerMode: 'workspace' as const, status: 'waiting_for_submission' as const },
+    };
+    let releaseReady: (ready: boolean) => void = () => undefined;
+    const ready = new Promise<boolean>((resolve) => { releaseReady = resolve; });
+    const sendMessage = vi.fn().mockResolvedValue({ ok: true, data: record });
+    const adapter = new ChatGptAdapter();
+    vi.spyOn(adapter, 'waitForComposerReady').mockReturnValue(ready);
+    vi.spyOn(adapter, 'waitForSubmitReady').mockResolvedValue(true);
+    vi.spyOn(adapter, 'fillComposer').mockReturnValue(true);
+    const submitComposer = vi.spyOn(adapter, 'submitComposer').mockReturnValue(true);
+    vi.spyOn(adapter, 'hasSubmittedPrompt').mockReturnValueOnce(false).mockReturnValue(true);
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }), new ClipboardManager(undefined, () => false), adapter);
+    act(() => manager.applyRecord(record));
+    const execute = manager as unknown as { fill(id: string): Promise<boolean> };
+    await act(async () => {
+      const first = execute.fill(record.pendingThread.id);
+      const second = execute.fill(record.pendingThread.id);
+      expect(await second).toBe(false);
+      releaseReady(true);
+      expect(await first).toBe(true);
+    });
+    expect(submitComposer).toHaveBeenCalledOnce();
+    act(() => manager.stop());
+  });
+
+  it('does not reserve a submission when clicking produced no rendered user turn', async () => {
+    vi.useFakeTimers();
+    const workspace = association('workspace-editor-error').record;
+    const record = { ...workspace,
+      pendingThread: { ...workspace.pendingThread, answerMode: 'workspace' as const, promptHash: 'editor-error-hash' },
+      localThread: { ...workspace.localThread, answerMode: 'workspace' as const, status: 'waiting_for_submission' as const },
+    };
+    const runtime = {
+      sendMessage: vi.fn().mockImplementation((message: { type?: string }) => Promise.resolve({
+        ok: true, data: message.type === 'pointask:get-page-pending-threads' ? [] : record,
+      })),
+      onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+    };
+    const adapter = new ChatGptAdapter();
+    vi.spyOn(adapter, 'waitForComposerReady').mockResolvedValue(true);
+    vi.spyOn(adapter, 'waitForSubmitReady').mockResolvedValue(true);
+    vi.spyOn(adapter, 'fillComposer').mockReturnValue(true);
+    vi.spyOn(adapter, 'canSubmitComposer').mockReturnValue(true);
+    vi.spyOn(adapter, 'submitComposer').mockReturnValue(true);
+    vi.spyOn(adapter, 'hasSubmittedPrompt').mockReturnValue(false);
+    const manager = new PendingBannerManager(new WebConversationBridge(runtime), new ClipboardManager(undefined, () => false), adapter);
+    act(() => manager.applyRecord(record));
+    const execute = manager as unknown as { fill(id: string): Promise<boolean> };
+    let success = true;
+    await act(async () => {
+      const sending = execute.fill(record.pendingThread.id);
+      await vi.advanceTimersByTimeAsync(15_100);
+      success = await sending;
+    });
+    expect(success).toBe(false);
+    expect(runtime.sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'pointask:reserve-prompt-submission' }));
+    act(() => manager.stop());
+    vi.useRealTimers();
   });
 
   it('keeps a current-conversation pending out of generic attachment choices and the top-right banner', () => {
@@ -209,6 +281,105 @@ describe('manual answer confirmation and storage', () => {
     expect(action?.shadowRoot?.textContent).not.toContain('附加并返回');
     expect(action?.shadowRoot?.textContent).toContain('框选部分附加');
     expect(action?.shadowRoot?.textContent).toContain('仅返回原文');
+    act(() => manager.stop());
+  });
+
+  it('offers Attach and Attach-and-return for one unique Workspace answer and returns only after saving', async () => {
+    document.body.innerHTML = chatGptFixture;
+    const adapter = new ChatGptAdapter();
+    const answer = document.querySelector<HTMLElement>('[data-testid="conversation-turn-2"]')!;
+    const fingerprint = adapter.getMessageFingerprint(answer);
+    const base = association('workspace-attach-return').record;
+    let current: PendingAssociation = {
+      ...base,
+      pendingThread: { ...base.pendingThread, answerMode: 'workspace', promptHash: 'workspace-hash', status: 'answer_ready' },
+      localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready' },
+    };
+    vi.spyOn(adapter, 'findCandidateAnswer').mockReturnValue({ element: answer, fingerprint, streaming: false });
+    vi.spyOn(adapter, 'getMessageRichContent').mockReturnValue({
+      plainText: '唯一匹配回答', blocks: [{ type: 'paragraph', children: [{ type: 'text', content: '唯一匹配回答' }] }],
+    });
+    const calls: string[] = [];
+    const sendMessage = vi.fn().mockImplementation((message: { type: string }) => {
+      calls.push(message.type);
+      if (message.type === 'pointask:attach-answer') current = {
+        ...current,
+        pendingThread: { ...current.pendingThread, status: 'answer_attached' },
+        localThread: { ...current.localThread, status: 'answer_attached', messages: [
+          ...current.localThread.messages,
+          { id: 'workspace-answer', role: 'assistant' as const, content: [{ type: 'text' as const, content: '唯一匹配回答' }], attachedManually: true, createdAt: current.updatedAt },
+        ] },
+      };
+      return Promise.resolve({ ok: true, data: current });
+    });
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }), new ClipboardManager(undefined, () => false), adapter,
+      { authorize: vi.fn().mockResolvedValue(true) } as never);
+    await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
+    const banner = document.querySelector('pointask-pending-thread-banner')?.shadowRoot;
+    expect(banner?.textContent).toContain('附加回答');
+    expect(banner?.textContent).toContain('附加并返回');
+    const attachAndReturn = manager as unknown as { attachWhole(id: string, returnAfter: boolean): Promise<void> };
+    await act(async () => { await attachAndReturn.attachWhole('workspace-attach-return', true); });
+    expect(calls.indexOf('pointask:attach-answer')).toBeGreaterThanOrEqual(0);
+    expect(calls.indexOf('pointask:pending-thread-updated')).toBeGreaterThan(calls.indexOf('pointask:attach-answer'));
+    act(() => manager.stop());
+  });
+
+  it('does not return when Attach-and-return fails', async () => {
+    document.body.innerHTML = chatGptFixture;
+    const adapter = new ChatGptAdapter();
+    const answer = document.querySelector<HTMLElement>('[data-testid="conversation-turn-2"]')!;
+    const fingerprint = adapter.getMessageFingerprint(answer); const base = association('workspace-attach-failure').record;
+    const current: PendingAssociation = {
+      ...base,
+      pendingThread: { ...base.pendingThread, answerMode: 'workspace', promptHash: 'workspace-hash', status: 'answer_ready' },
+      localThread: { ...base.localThread, answerMode: 'workspace', status: 'answer_ready' },
+    };
+    vi.spyOn(adapter, 'findCandidateAnswer').mockReturnValue({ element: answer, fingerprint, streaming: false });
+    vi.spyOn(adapter, 'getMessageRichContent').mockReturnValue({ plainText: '回答', blocks: [{ type: 'text', content: '回答' }] });
+    const sendMessage = vi.fn().mockImplementation((message: { type: string }) => Promise.resolve(message.type === 'pointask:attach-answer'
+      ? { ok: false, error: '附加失败，请重试' } : { ok: true, data: current }));
+    const manager = new PendingBannerManager(new WebConversationBridge({ sendMessage }), new ClipboardManager(undefined, () => false), adapter,
+      { authorize: vi.fn().mockResolvedValue(true) } as never);
+    await act(async () => { manager.applyRecord(current); await Promise.resolve(); });
+    const attachAndReturn = manager as unknown as { attachWhole(id: string, returnAfter: boolean): Promise<void> };
+    await act(async () => { await attachAndReturn.attachWhole('workspace-attach-failure', true); });
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: 'pointask:pending-thread-updated', action: 'return-source',
+    }));
+    expect(document.querySelector('pointask-pending-thread-banner')?.shadowRoot?.textContent).toContain('附加失败，请重试');
+    act(() => manager.stop());
+  });
+
+  it('requires manual selection when two Workspace threads match the same answer', async () => {
+    document.body.innerHTML = chatGptFixture;
+    const adapter = new ChatGptAdapter();
+    const answer = document.querySelector<HTMLElement>('[data-testid="conversation-turn-2"]')!;
+    const fingerprint = adapter.getMessageFingerprint(answer);
+    const records = ['workspace-ambiguous-one', 'workspace-ambiguous-two'].map((id, index) => {
+      const base = association(id).record;
+      return {
+        ...base,
+        pendingThread: { ...base.pendingThread, answerMode: 'workspace' as const, promptHash: `workspace-hash-${index}`, status: 'answer_ready' as const },
+        localThread: { ...base.localThread, answerMode: 'workspace' as const, status: 'answer_ready' as const },
+      };
+    });
+    vi.spyOn(adapter, 'findCandidateAnswer').mockReturnValue({ element: answer, fingerprint, streaming: false });
+    const manager = new PendingBannerManager(new WebConversationBridge({
+      sendMessage: vi.fn().mockImplementation((message: { pendingThreadId?: string }) => Promise.resolve({
+        ok: true,
+        data: records.find((record) => record.pendingThread.id === message.pendingThreadId) ?? records[0],
+      })),
+    }), new ClipboardManager(undefined, () => false), adapter);
+    await act(async () => {
+      for (const record of records) manager.applyRecord(record);
+      await Promise.resolve();
+    });
+    const banner = document.querySelector('pointask-pending-thread-banner')?.shadowRoot;
+    expect(banner?.textContent).toContain('匹配不唯一');
+    expect(banner?.textContent).toContain('框选部分附加');
+    expect(banner?.textContent).not.toContain('附加并返回');
+    expect(banner?.textContent).not.toContain('附加回答');
     act(() => manager.stop());
   });
 

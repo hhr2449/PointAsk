@@ -8,6 +8,7 @@ interface PendingThreadBannerProps {
   errors: Map<string, string>;
   confirmingIds: Set<string>;
   candidates: Map<string, CandidateAnswer>;
+  attachableIds: Set<string>;
   onCopy(id: string): void;
   onFill(id: string): void;
   onAssociate(id: string, confirmed: boolean): void;
@@ -15,6 +16,7 @@ interface PendingThreadBannerProps {
   onCancel(id: string): void;
   onClose(id: string): void;
   onAttachWhole(id: string): void;
+  onAttachAndReturn(id: string): void;
   onSelectPartial(id: string): void;
   onUndo(id: string): void;
 }
@@ -24,7 +26,8 @@ function summary(text: string): string {
 }
 
 export function PendingThreadBanner({
-  records, copiedIds, errors, confirmingIds, candidates, onFill, onAssociate, onReturn, onCancel, onClose, onAttachWhole, onSelectPartial, onUndo,
+  records, copiedIds, errors, confirmingIds, candidates, attachableIds, onFill, onAssociate, onReturn, onCancel, onClose,
+  onAttachWhole, onAttachAndReturn, onSelectPartial, onUndo,
 }: PendingThreadBannerProps) {
   return (
     <div className="pointask-banner-list" aria-label="PointAsk 等待回答线程">
@@ -38,7 +41,7 @@ export function PendingThreadBanner({
           <section className="pointask-banner" key={pending.id}>
             <button type="button" className="pointask-banner-close" aria-label="关闭提示条" onClick={() => onClose(pending.id)}>×</button>
             <strong>{manual ? '关联手动分支' : attached ? '已附加' : candidate && !candidate.streaming ? '回答已生成' : failed ? '发送失败' :
-              pending.submittedPromptHash === pending.promptHash ? '正在等待回答……' : '正在发送……'}</strong>
+              pending.submittedPromptHash === pending.promptHash ? '正在等待回答……' : '等待发送'}</strong>
             <div className="pointask-banner-source">来源：{pending.richSelection ? <RichContentRenderer blocks={pending.richSelection.blocks} /> : `“${summary(pending.anchor.selectedText)}”`}</div>
             <p><b>线程：</b>{record.localThread.displayId}</p>
             <p><b>问题：</b>{pending.question}</p>
@@ -65,11 +68,17 @@ export function PendingThreadBanner({
               </div>
             ) : candidate ? (
               <>
-                <p>{candidate.streaming ? '正在等待回答……' : '已可靠定位到此线程的新回答。请选择附加方式。'}</p>
+                <p>{candidate.streaming ? '正在等待回答……' : attachableIds.has(pending.id)
+                  ? '已可靠定位到此线程的新回答。请选择附加方式。'
+                  : '已定位到候选回答，但匹配不唯一。请框选需要附加的内容。'}</p>
                 <div className="pointask-banner-actions">
-                  <button type="button" className="pointask-primary" disabled={candidate.streaming} onClick={() => onAttachWhole(pending.id)}>一键附加整条回答</button>
+                  {attachableIds.has(pending.id) && <>
+                    <button type="button" className="pointask-primary" disabled={candidate.streaming} onClick={() => onAttachWhole(pending.id)}>附加回答</button>
+                    <button type="button" className="pointask-primary" disabled={candidate.streaming} onClick={() => onAttachAndReturn(pending.id)}>附加并返回</button>
+                  </>}
                   <button type="button" className="pointask-secondary" onClick={() => onSelectPartial(pending.id)}>框选部分附加</button>
                   <button type="button" className="pointask-secondary" onClick={() => onReturn(pending.id)}>返回原文</button>
+                  <button type="button" className="pointask-secondary" onClick={() => onCancel(pending.id)}>取消关联</button>
                 </div>
               </>
             ) : failed ? (
@@ -84,8 +93,10 @@ export function PendingThreadBanner({
               </div></>
             ) : (
               <>
-                <p>正在发送……</p>
+                <p>已打开追问空间。点击下方按钮后才会填入并发送；页面跳转或恢复不会自动发送。</p>
                 <div className="pointask-banner-actions">
+                  <button type="button" className="pointask-primary" onClick={() => onFill(pending.id)}>发送到追问空间</button>
+                  <button type="button" className="pointask-secondary" onClick={() => onSelectPartial(pending.id)}>前往选择回答</button>
                   <button type="button" className="pointask-secondary" onClick={() => onReturn(pending.id)}>返回来源页面</button>
                   <button type="button" className="pointask-secondary" onClick={() => onCancel(pending.id)}>取消关联</button>
                 </div>

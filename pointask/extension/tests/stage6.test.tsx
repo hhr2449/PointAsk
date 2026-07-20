@@ -8,6 +8,8 @@ import type { PointAskRuntimeMessage } from '../src/bridge/runtime-messages';
 import { WebConversationBridge } from '../src/bridge/web-conversation-bridge';
 import { InlineThreadManager } from '../src/content/inline-thread-manager';
 import type { LocalMessage, LocalThread, TextAnchor } from '../src/shared/local-thread';
+import { MemoryStorageDriver } from '../src/storage/storage-driver';
+import { ThreadStore } from '../src/storage/thread-store';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -45,7 +47,7 @@ function attachedThread(id = 'pointask-multi'): LocalThread {
 describe('multi-turn prompt and thread flow', () => {
   beforeEach(() => { document.body.innerHTML = '<p id="anchor">来源段落</p>'; });
 
-  it('adds a second question and routes it immediately from the composer send click', async () => {
+  it('adds a second question and opens its target without sending from the source page', async () => {
     const pendingManager = new PendingThreadManager(() => new Date(timestamp), () => 'unused');
     pendingManager.restore(pending());
     let currentThread = attachedThread();
@@ -84,8 +86,88 @@ describe('multi-turn prompt and thread flow', () => {
     expect(update && 'pendingThread' in update ? update.pendingThread.generatedPrompt : '').toContain('局部回答：第一答');
     expect(update && 'pendingThread' in update ? update.pendingThread.generatedPrompt : '').toContain('我的问题：\n第二问');
     expect(writeText).not.toHaveBeenCalled();
-    expect(sent.some((message) => message.type === 'pointask:open-answer-page')).toBe(false);
-    expect(sent.some((message) => message.type === 'pointask:send-pending-prompt')).toBe(true);
+    expect(sent.some((message) => message.type === 'pointask:open-answer-page')).toBe(true);
+    expect(sent.some((message) => message.type === 'pointask:reserve-prompt-submission')).toBe(false);
+  });
+
+  it('renders each round as one collapsible unit and keeps historical rounds collapsed by default', async () => {
+    document.body.innerHTML = '<p id="anchor">来源段落</p>';
+    const thread = attachedThread();
+    thread.messages.push(
+      { id: 'q2', role: 'user', content: [{ type: 'text', content: '第二问：解释 CUDA 内存模型' }], attachedManually: false, createdAt: timestamp },
+      { id: 'a2', role: 'assistant', content: [{ type: 'text', content: '第二答' }], answerSource: { conversationUrl: 'https://chatgpt.com/c/target', conversationKey: 'https://chatgpt.com/c/target', messageFingerprint: 'a2' }, attachedManually: true, createdAt: timestamp },
+    );
+    thread.expanded = true;
+    const manager = new InlineThreadManager(new PendingThreadManager(), new ClipboardManager(undefined, () => false));
+    await act(() => manager.mount(thread, document.getElementById('anchor') as HTMLElement));
+    const shadow = manager.getHost(thread.id)?.shadowRoot;
+    const toggles = shadow?.querySelectorAll<HTMLButtonElement>('.pointask-round-toggle');
+    expect(toggles).toHaveLength(2);
+    expect(toggles?.[0]?.getAttribute('aria-expanded')).toBe('false');
+    expect(toggles?.[1]?.getAttribute('aria-expanded')).toBe('true');
+    expect(shadow?.textContent).toContain('问题 1：第一问');
+    expect(shadow?.textContent).toContain('问题 2：第二问：解释 CUDA 内存模型');
+    expect(shadow?.textContent).not.toContain('用户问题');
+    expect(shadow?.textContent).not.toContain('已附加');
+    expect(shadow?.querySelectorAll('.pointask-round-question')).toHaveLength(1);
+    expect(shadow?.querySelector('.pointask-round-question-label')).toBeNull();
+    expect(shadow?.querySelector('.pointask-round-answer .pointask-secondary')).not.toBeNull();
+  });
+
+  it('opens only the round that receives a new answer', async () => {
+    const thread = attachedThread();
+    thread.messages.push({ id: 'q2', role: 'user', content: [{ type: 'text', content: '第二问' }], attachedManually: false, createdAt: timestamp });
+    thread.status = 'waiting_for_answer';
+    thread.expanded = true;
+    thread.collapsedRoundIds = ['q1', 'q2'];
+    const pendingManager = new PendingThreadManager();
+    pendingManager.restore(pending());
+    const manager = new InlineThreadManager(pendingManager, new ClipboardManager(undefined, () => false));
+    await act(() => manager.mount(thread, document.getElementById('anchor') as HTMLElement));
+    const updatedThread: LocalThread = {
+      ...thread,
+      messages: [...thread.messages, {
+        id: 'a2', role: 'assistant', content: [{ type: 'text', content: '第二答' }],
+        answerSource: { conversationUrl: 'https://chatgpt.com/c/target', conversationKey: 'https://chatgpt.com/c/target', messageFingerprint: 'a2' },
+        attachedManually: true, createdAt: timestamp,
+      }],
+      status: 'answer_attached',
+    };
+    act(() => manager.handleAssociationUpdate({
+      pendingThread: { ...pending(), status: 'answer_attached' }, localThread: updatedThread,
+      sourceTabId: 1, targetTabId: 2, targetConversationUrl: 'https://chatgpt.com/c/target',
+      associationStatus: 'associated', createdAt: timestamp, updatedAt: timestamp,
+    }));
+    const toggles = manager.getHost(thread.id)?.shadowRoot?.querySelectorAll<HTMLButtonElement>('.pointask-round-toggle');
+    expect(toggles?.[0]?.getAttribute('aria-expanded')).toBe('false');
+    expect(toggles?.[1]?.getAttribute('aria-expanded')).toBe('true');
+    expect(manager.getThread(thread.id)?.collapsedRoundIds).toEqual(['q1']);
+  });
+
+  it('persists round fold state and restores it after remounting', async () => {
+    document.body.innerHTML = '<p id="anchor">来源段落</p>';
+    const driver = new MemoryStorageDriver();
+    const store = new ThreadStore(driver);
+    const thread = attachedThread();
+    thread.messages.push(
+      { id: 'q2', role: 'user', content: [{ type: 'text', content: '第二问' }], attachedManually: false, createdAt: timestamp },
+      { id: 'a2', role: 'assistant', content: [{ type: 'text', content: '第二答' }], answerSource: { conversationUrl: 'https://chatgpt.com/c/target', conversationKey: 'https://chatgpt.com/c/target', messageFingerprint: 'a2' }, attachedManually: true, createdAt: timestamp },
+    );
+    thread.expanded = true;
+    await store.upsert(thread);
+    const manager = new InlineThreadManager(new PendingThreadManager(), new ClipboardManager(undefined, () => false), undefined, undefined, undefined, store);
+    await act(() => manager.mount(thread, document.getElementById('anchor') as HTMLElement));
+    await act(async () => { await manager.toggleRound(thread.id, 'q1'); });
+    await vi.waitFor(async () => {
+      const stored = await store.get(thread.id);
+      expect(stored?.collapsedRoundIds).toEqual([]);
+    });
+    expect(manager.getHost(thread.id)?.shadowRoot?.querySelectorAll<HTMLButtonElement>('.pointask-round-toggle')[0]?.getAttribute('aria-expanded')).toBe('true');
+
+    const remounted = (await store.get(thread.id))!;
+    const nextManager = new InlineThreadManager(new PendingThreadManager(), new ClipboardManager(undefined, () => false), undefined, undefined, undefined, store);
+    await act(() => nextManager.mount(remounted, document.getElementById('anchor') as HTMLElement));
+    expect(nextManager.getHost(thread.id)?.shadowRoot?.querySelectorAll<HTMLButtonElement>('.pointask-round-toggle')[0]?.getAttribute('aria-expanded')).toBe('true');
   });
 
   it('keeps recent rounds under a deterministic history character budget', () => {

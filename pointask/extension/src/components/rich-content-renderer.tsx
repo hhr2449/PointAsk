@@ -21,7 +21,7 @@ export const richContentStyles = `${katexCss.replaceAll('url(/assets/', `url(${k
 .pointask-rich-content li::marker { color: var(--pa-text, currentColor); }
 .pointask-rich-content strong,
 .pointask-rich-content b { font-size: inherit; line-height: inherit; font-family: inherit; letter-spacing: inherit; font-weight: 600; }
-.pointask-rich-content :is(strong, b) > span { font-size: inherit; line-height: inherit; font-family: inherit; letter-spacing: inherit; }
+.pointask-rich-content :is(strong, b) span { font-size: inherit; line-height: inherit; font-family: inherit; letter-spacing: inherit; font-weight: inherit; }
 .pointask-rich-content :where(em, i) { font-style: italic; }
 .pointask-rich-content hr { height: 1px; margin: 1em 0; border: 0; background: var(--pa-border, #d0d7de); }
 .pointask-rich-content input[type="checkbox"] { margin: 0 .45em 0 0; vertical-align: -.08em; accent-color: var(--pa-accent, #10a37f); }

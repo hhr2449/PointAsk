@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import type { PendingThread } from '../bridge/pending-thread-manager';
-import type { AnswerSourceLocator, LocalThread, PointAskWorkspace } from '../shared/local-thread';
+import type { AnswerSourceLocator, LocalMessage, LocalThread, PointAskWorkspace } from '../shared/local-thread';
 import { RichContentRenderer } from './rich-content-renderer';
 import { richPlainText } from '../shared/rich-content';
 
@@ -12,9 +12,10 @@ interface ThreadCardProps {
   onUnlinkAssociation(): void; onNewWorkspace(): void; onViewAnswer(locator: AnswerSourceLocator): void;
   onUndoAttachment(): void; onGoCandidate(): void;
   onUpdateWorkspaceContext(): void;
+  onToggleRound(roundId: string): void;
 }
 
-const summary = (text: string) => text.length > 48 ? `${text.slice(0, 48)}…` : text;
+const summary = (text: string) => text.length > 42 ? `${text.slice(0, 42)}…` : text;
 const MENU_MARGIN = 8;
 const MENU_GAP = 4;
 
@@ -60,12 +61,52 @@ function MoreMenu({ label, expanded, overlay, children }: { label: string; expan
   </>;
 }
 
+interface ThreadRound {
+  id: string;
+  question: LocalMessage;
+  collapsed: boolean;
+  latestAnswer: LocalMessage | null;
+}
+
+function groupRounds(thread: LocalThread): ThreadRound[] {
+  const userMessages = thread.messages.filter((message) => message.role === 'user');
+  const hasExplicitState = Array.isArray(thread.collapsedRoundIds);
+  const collapsed = new Set(thread.collapsedRoundIds ?? []);
+  const rounds: ThreadRound[] = [];
+  let current: ThreadRound | null = null;
+  let index = 0;
+  for (const message of thread.messages) {
+    if (message.role === 'user') {
+      current = {
+        id: message.id,
+        question: message,
+        collapsed: hasExplicitState ? collapsed.has(message.id) : index < Math.max(0, userMessages.length - 1),
+        latestAnswer: null,
+      };
+      rounds.push(current);
+      index += 1;
+      continue;
+    }
+    if (!current) continue;
+    current.latestAnswer = message;
+  }
+  return rounds;
+}
+
+function roundMenuLabel(threadId: string, roundIndex: number): string {
+  return `${threadId} 问题 ${roundIndex + 1} 更多操作`;
+}
+
+function confirmDeleteRound(index: number): boolean {
+  return window.confirm(`删除问题 ${index + 1} 这一轮吗？此操作无法撤销。`);
+}
+
 export function ThreadCard(props: ThreadCardProps) {
   const { thread, error, manualBranch, expanded, sending } = props;
+  const rounds = groupRounds(thread);
   const answers = thread.messages.filter((message) => message.role === 'assistant');
   const latestAnswer = answers.at(-1);
-  const questionTitle = richPlainText(thread.messages.find((message) => message.role === 'user')?.content ?? []);
-  const rounds = thread.messages.filter((message) => message.role === 'user').length;
+  const roundCount = rounds.length;
   const waitingSubmission = thread.status === 'draft' || thread.status === 'prompt_ready' || thread.status === 'waiting_for_submission';
   const waitingAnswer = thread.status === 'waiting_for_answer' || thread.status === 'generating';
   const answerReady = thread.status === 'answer_ready';
@@ -74,7 +115,7 @@ export function ThreadCard(props: ThreadCardProps) {
   const modeLabel = thread.answerMode === 'workspace' ? '共享追问空间' : thread.answerMode === 'current_conversation' ? '当前对话' : '独立分支';
   const failed = thread.status === 'failed';
   const statusLabel = sending || waitingSubmission ? '正在发送……' : waitingAnswer ? (currentConversation ? '正在回答' : '正在等待回答……') : answerReady ? '回答已生成'
-    : attached ? '已附加' : failed ? '发送失败' : '关联失效';
+    : failed ? '发送失败' : thread.status === 'orphaned' ? '关联失效' : null;
   const primaryLabel = attached ? '继续追问' : currentConversation && (waitingAnswer || answerReady) ? '查看新回答'
     : failed ? '重新发送' : '查看回答';
   const primaryAction = attached ? props.onContinue : currentConversation && (waitingAnswer || answerReady)
@@ -85,8 +126,7 @@ export function ThreadCard(props: ThreadCardProps) {
     <header className="pointask-thread-header">
       <button type="button" className="pointask-toggle" aria-expanded={expanded} onClick={props.onToggle}>
         <span className={`pointask-status-dot pointask-status-${thread.status}`} aria-hidden="true" />
-        <span className="pointask-summary"><b>{thread.displayId}</b><span>{summary(questionTitle || thread.anchor.selectedText)}</span></span>
-        <span className="pointask-count">{rounds} 轮</span>
+        <span className="pointask-summary"><b>{thread.displayId}</b><span>{roundCount} 轮</span></span>
       </button>
       <div className="pointask-header-actions" aria-label={`${thread.displayId} 快捷操作`}>
         {showPrimary && <button type="button" className="pointask-quick pointask-primary-action" onClick={primaryAction}>{primaryLabel}</button>}
@@ -103,8 +143,8 @@ export function ThreadCard(props: ThreadCardProps) {
       </div>
     </header>
     {expanded && <div className="pointask-thread-body">
-      <div className="pointask-status" role="status"><strong>{thread.displayId} · {modeLabel}</strong><br />
-        <span className="pointask-status-line"><span className={`pointask-status-dot pointask-status-${thread.status}`} aria-hidden="true" />{statusLabel}</span></div>
+      {statusLabel && <div className="pointask-status" role="status"><strong>{thread.displayId} · {modeLabel}</strong><br />
+        <span className="pointask-status-line"><span className={`pointask-status-dot pointask-status-${thread.status}`} aria-hidden="true" />{statusLabel}</span></div>}
       {thread.answerMode === 'current_conversation' && <p className="pointask-warning">当前对话回答：此局部问答同时存在于 ChatGPT 主聊天记录中。</p>}
       {thread.answerMode === 'workspace' && props.workspace && <div className="pointask-workspace-context" role="status">
         <span>{props.workspace.contextState.status === 'fresh' ? '上下文已更新' : props.workspace.contextState.status === 'outdated'
@@ -112,12 +152,48 @@ export function ThreadCard(props: ThreadCardProps) {
         <button type="button" className="pointask-primary" onClick={props.onUpdateWorkspaceContext}>更新上下文</button>
       </div>}
       <div className="pointask-selection"><strong>选中文字</strong><div className="pointask-selection-content">{thread.richSelection ? <RichContentRenderer blocks={thread.richSelection.blocks} /> : thread.anchor.selectedText}</div></div>
-      {thread.messages.map((message, index) => <div className={`pointask-message pointask-${message.role}`} key={message.id}>
-        <strong>{message.role === 'user' ? `用户问题 ${thread.messages.slice(0, index + 1).filter((item) => item.role === 'user').length}` : 'ChatGPT 回答（用户手动附加）'}</strong>
-        <div className="pointask-message-content"><RichContentRenderer blocks={message.content} /></div>
-        {message.role === 'assistant' && message.answerSource && <button type="button" onClick={() => props.onViewAnswer(message.answerSource!)}>查看原回答</button>}
-        {message.role === 'user' && answers.length > 1 && <button type="button" onClick={() => props.onDeleteRound(message.id)}>删除本轮</button>}
-      </div>)}
+      <div className="pointask-round-list">
+        {rounds.map((round, index) => {
+          const expandedRound = !round.collapsed;
+          const answer = round.latestAnswer;
+          return <section className="pointask-round" key={round.id}>
+            <header className="pointask-round-header">
+              <button type="button" className="pointask-round-toggle" aria-expanded={expandedRound} onClick={() => props.onToggleRound(round.id)}>
+                <span className="pointask-round-title">
+                  <b>{`问题 ${index + 1}：`}</b>
+                  <span>{summary(richPlainText(round.question.content) || thread.anchor.selectedText)}</span>
+                </span>
+                <span className="pointask-round-chevron" aria-hidden="true">{expandedRound ? '▾' : '▸'}</span>
+              </button>
+              <MoreMenu label={roundMenuLabel(thread.displayId, index)} expanded={expanded} overlay={props.menuOverlay}>
+                {answer?.answerSource && <button type="button" onClick={() => props.onViewAnswer(answer.answerSource!)}>查看原回答</button>}
+                {attached && index === rounds.length - 1 && <button type="button" onClick={props.onOpenAnswer}>替换回答</button>}
+                {thread.messages.length > 1 && <button
+                  type="button"
+                  className="pointask-danger"
+                  onClick={() => { if (confirmDeleteRound(index)) props.onDeleteRound(round.id); }}
+                >
+                  删除本轮
+                </button>}
+              </MoreMenu>
+            </header>
+            {expandedRound && <div className="pointask-round-body">
+              <div className="pointask-round-question" aria-label={`问题 ${index + 1} 正文`}>
+                <div className="pointask-round-question-content"><RichContentRenderer blocks={round.question.content} /></div>
+              </div>
+              <div className="pointask-round-answer">
+                <div className="pointask-round-answer-label">回答</div>
+                <div className="pointask-round-answer-content">
+                  {answer ? <RichContentRenderer blocks={answer.content} /> : <span>{waitingAnswer ? '回答正在生成中……' : waitingSubmission ? '问题已准备好，等待发送。' : '回答尚未生成。'}</span>}
+                </div>
+                {answer?.answerSource && <div className="pointask-round-actions">
+                  <button type="button" className="pointask-secondary pointask-round-secondary" onClick={() => props.onViewAnswer(answer.answerSource!)}>查看原回答</button>
+                </div>}
+              </div>
+            </div>}
+          </section>;
+        })}
+      </div>
       {error && <p className="pointask-error" role="alert">{error}</p>}
       {error && <div className="pointask-error-actions"><button type="button" onClick={props.onManualBranch}>重新关联当前页面</button><button type="button" onClick={props.onOpenAnswer}>打开已关联页面</button><button type="button" onClick={props.onCancel}>取消当前操作</button></div>}
       {manualBranch && <p>请在目标 ChatGPT 页面重新关联当前线程。</p>}

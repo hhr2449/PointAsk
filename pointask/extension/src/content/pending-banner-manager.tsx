@@ -33,6 +33,7 @@ export class PendingBannerManager {
   private readonly confirmingIds = new Set<string>();
   private cleanupRuntime: (() => void) | null = null;
   private cleanupExecuteSend: (() => void) | null = null;
+  private cleanupReadyProbe: (() => void) | null = null;
   private urlTimer: ReturnType<typeof setInterval> | null = null;
   private currentUrl = window.location.href;
   private readonly candidates = new Map<string, CandidateAnswer>();
@@ -65,6 +66,12 @@ export class PendingBannerManager {
   }
 
   async start(): Promise<void> {
+    this.cleanupReadyProbe = this.bridge.onTargetReadyProbe((targetConversationUrl) => {
+      const conversationUrl = window.location.href;
+      const urlMatches = isCompatibleChatGptTargetUrl(targetConversationUrl, conversationUrl);
+      const composerReady = Boolean(urlMatches && this.adapter?.isComposerReady());
+      return { ready: composerReady, conversationUrl, composerReady };
+    });
     const records = await this.bridge.getPagePendingThreads();
     this.records = new Map(records.map((record) => [record.pendingThread.id, record]));
     this.render();
@@ -81,10 +88,13 @@ export class PendingBannerManager {
       this.refreshCandidates();
       this.render();
     });
-    this.cleanupExecuteSend = this.bridge.onExecutePendingSend(async (record) => {
-      if (record.localThread.answerMode === 'current_conversation' || record.pendingThread.id !== record.localThread.id) return false;
+    this.cleanupExecuteSend = this.bridge.onExecutePendingSend(async (record, _attemptId, promptHash) => {
+      if (record.localThread.answerMode !== 'workspace' || record.pendingThread.promptHash !== promptHash) {
+        return { ok: false, error: '目标页面与共享追问线程不匹配' };
+      }
       this.applyRecord(record);
-      return this.fill(record.pendingThread.id, true);
+      const ok = await this.fill(record.pendingThread.id, true);
+      return { ok, error: ok ? undefined : this.errors.get(record.pendingThread.id) };
     });
     this.refreshCandidates();
     this.cleanupCandidateObserver = this.adapter?.observePageChanges(() => this.refreshCandidates()) ?? null;
@@ -123,8 +133,8 @@ export class PendingBannerManager {
   stop(): void {
     this.cleanupRuntime?.();
     this.cleanupRuntime = null;
-    this.cleanupExecuteSend?.();
-    this.cleanupExecuteSend = null;
+    this.cleanupExecuteSend?.(); this.cleanupExecuteSend = null;
+    this.cleanupReadyProbe?.(); this.cleanupReadyProbe = null;
     this.cleanupCandidateObserver?.();
     this.cleanupCandidateObserver = null;
     window.removeEventListener('popstate', this.checkUrl);
@@ -155,6 +165,8 @@ export class PendingBannerManager {
   private render(): void {
     const visible = [...this.records.values()].filter((record) => !this.closedIds.has(record.pendingThread.id) &&
       record.localThread.answerMode !== 'current_conversation');
+    const attachableIds = new Set([...this.candidates].filter(([id, candidate]) =>
+      this.isReliableCandidate(id, candidate)).map(([id]) => id));
     this.host.style.display = visible.length ? 'block' : 'none';
     this.root.render(
       <PendingThreadBanner
@@ -163,6 +175,7 @@ export class PendingBannerManager {
         errors={this.errors}
         confirmingIds={this.confirmingIds}
         candidates={this.candidates}
+        attachableIds={attachableIds}
         onCopy={(id) => void this.copy(id)}
         onFill={(id) => void this.fill(id)}
         onAssociate={(id, confirmed) => void this.associate(id, confirmed)}
@@ -170,6 +183,7 @@ export class PendingBannerManager {
         onCancel={(id) => void this.cancel(id)}
         onClose={(id) => { this.closedIds.add(id); this.render(); }}
         onAttachWhole={(id) => void this.attachWhole(id)}
+        onAttachAndReturn={(id) => void this.attachWhole(id, true)}
         onSelectPartial={(id) => this.selectPartial(id)}
         onUndo={(id) => void this.undo(id)}
       />,
@@ -196,22 +210,22 @@ export class PendingBannerManager {
     if (!skipAuthorization && this.authorizer && !(await this.authorizer.authorize())) return false;
     this.sendingIds.add(id); this.errors.set(id, '正在发送……'); this.render();
     try {
-      let filled = false;
-      for (let attempt = 0; !filled && attempt < 150; attempt++) {
-        filled = Boolean(this.adapter?.fillComposer(record.pendingThread.generatedPrompt));
-        if (!filled) await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!this.adapter || !(await this.adapter.waitForComposerReady())) throw new Error('追问空间尚未准备好，请重试');
+      if (!this.adapter.fillComposer(record.pendingThread.generatedPrompt)) throw new Error('追问空间输入框暂时无法写入');
+      if (!(await this.adapter.waitForSubmitReady())) throw new Error('发送按钮当前不可用');
+      const promptHash = record.pendingThread.promptHash ?? '';
+      let submitted = this.adapter.hasSubmittedPrompt(promptHash);
+      if (!submitted) {
+        if (!this.adapter.submitComposer()) throw new Error('发送失败，请重试');
+        for (let attempt = 0; !submitted && attempt < 150; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          submitted = this.adapter.hasSubmittedPrompt(promptHash);
+        }
       }
-      if (!filled || !this.adapter) throw new Error('追问空间尚未准备好，请重试');
-      let ready = this.adapter.canSubmitComposer();
-      for (let attempt = 0; !ready && attempt < 50; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 100)); ready = this.adapter.canSubmitComposer();
-      }
-      if (!ready) throw new Error('发送按钮当前不可用');
-      const reserved = await this.bridge.reservePromptSubmission(id, record.pendingThread.promptHash ?? '', window.location.href);
-      if (!this.adapter.submitComposer()) {
-        await this.bridge.releasePromptSubmission(id, record.pendingThread.promptHash ?? '').catch(() => undefined);
-        throw new Error('发送失败，请重试');
-      }
+      if (!submitted) throw new Error('未检测到已发送的用户消息，请重试');
+      // Commit waiting_for_answer only after ChatGPT has rendered the exact
+      // user turn. button.click() alone is not proof that React accepted it.
+      const reserved = await this.bridge.reservePromptSubmission(id, promptHash, window.location.href);
       this.records.set(id, reserved); this.errors.set(id, '已发送');
       showOperationToast('已发送');
       return true;
@@ -307,9 +321,14 @@ export class PendingBannerManager {
   }
 
   private isReliableCurrentCandidate(id: string, candidate: CandidateAnswer): boolean {
-    if (!this.reliableCandidateIds.has(id)) return false;
+    if (this.records.get(id)?.localThread.answerMode !== 'current_conversation') return false;
+    return this.isReliableCandidate(id, candidate);
+  }
+
+  private isReliableCandidate(id: string, candidate: CandidateAnswer): boolean {
+    if (!this.reliableCandidateIds.has(id) || candidate.streaming) return false;
     for (const [otherId, other] of this.candidates) {
-      if (otherId !== id && other.fingerprint === candidate.fingerprint && this.records.get(otherId)?.localThread.answerMode === 'current_conversation') return false;
+      if (otherId !== id && other.fingerprint === candidate.fingerprint) return false;
     }
     const record = this.records.get(id);
     const current = record && this.adapter?.findCandidateAnswer(record.pendingThread.promptHash ?? '', record.pendingThread.assistantFingerprintsBefore ?? []);
@@ -371,10 +390,13 @@ export class PendingBannerManager {
     this.render();
   }
 
-  private async attachWhole(id: string): Promise<void> {
+  private async attachWhole(id: string, returnAfter = false): Promise<void> {
     const record = this.records.get(id); const candidate = this.candidates.get(id);
     if (!record || !candidate || candidate.streaming) return;
     if (record.localThread.answerMode === 'current_conversation') return this.attachCurrentWholeAndReturn(id);
+    if (!this.isReliableCandidate(id, candidate)) {
+      this.errors.set(id, '回答匹配不唯一，请框选需要附加的内容'); this.render(); return;
+    }
     if (this.authorizer && !(await this.authorizer.authorize())) return;
     try {
       const richContent = this.adapter?.getMessageRichContent(candidate.element);
@@ -396,6 +418,7 @@ export class PendingBannerManager {
       showAttachmentUndo(this.bridge, updated, (restored) => { this.records.set(id, restored); this.render(); });
       this.candidates.delete(id);
       this.render();
+      if (returnAfter) await this.returnToSource(id);
     } catch (error) {
       this.errors.set(id, error instanceof Error ? error.message : '附加失败');
       this.render();

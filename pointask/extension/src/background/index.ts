@@ -6,20 +6,47 @@ import { PendingStore } from '../storage/pending-store';
 import { SettingsStore } from '../storage/settings-store';
 import { WorkspaceStore } from '../storage/workspace-store';
 import { runStorageMigration } from '../storage/migration';
-import { NavigationStore } from '../storage/navigation-store';
+import { NavigationStore, ThreadReturnStore } from '../storage/navigation-store';
 
 interface TabGateway {
-  create(options: { url: string; active: boolean }): Promise<{ id?: number; url?: string }>;
+  create(options: { url: string; active: boolean }): Promise<{ id?: number; url?: string; pendingUrl?: string; status?: string }>;
   update(tabId: number, options: { active: boolean; url?: string }): Promise<unknown>;
   sendMessage(tabId: number, message: unknown): Promise<unknown>;
   query?(queryInfo: { url: string }): Promise<Array<{ id?: number; url?: string }>>;
   remove?(tabId: number): Promise<void>;
-  get?(tabId: number): Promise<{ id?: number; url?: string; active?: boolean }>;
+  get?(tabId: number): Promise<{ id?: number; url?: string; active?: boolean; status?: string; pendingUrl?: string }>;
+  onRemoved?: { addListener(callback: (tabId: number) => void): void };
 }
 
-async function openOrActivateChat(tabs: TabGateway, url: string): Promise<{ id?: number; url?: string }> {
+function resolvedTargetUrl(tab: { url?: string; pendingUrl?: string }, requestedUrl: string): string {
+  for (const candidate of [tab.url, tab.pendingUrl]) {
+    if (candidate && isCompatibleChatGptTargetUrl(requestedUrl, candidate)) return candidate;
+  }
+  // tabs.create() may expose about:blank while the requested page is still
+  // loading. Never persist that transient browser URL as a conversation route.
+  return requestedUrl;
+}
+
+function isUnboundChatUrl(url: string): boolean {
+  try { return new URL(url).pathname.replace(/\/+$/, '') === ''; }
+  catch { return false; }
+}
+
+async function openOrActivateChat(tabs: TabGateway, url: string, preferredTabId?: number): Promise<{ id?: number; url?: string }> {
+  if (preferredTabId !== undefined && tabs.get) {
+    const preferred = await tabs.get(preferredTabId).catch(() => null);
+    if (preferred?.url && isCompatibleChatGptTargetUrl(url, preferred.url)) {
+      await tabs.update(preferredTabId, { active: true });
+      return { id: preferredTabId, url: preferred.url };
+    }
+  }
+  // A root URL may reuse only another exact root/new-chat tab. The general
+  // compatibility rule intentionally allows root -> /c/... SPA transitions,
+  // which would otherwise risk routing into the source conversation here.
   const existing = (await tabs.query?.({ url: 'https://chatgpt.com/*' }))?.find((tab) =>
-    tab.id !== undefined && tab.url && isCompatibleChatGptTargetUrl(url, tab.url),
+    tab.id !== undefined && tab.url && (isUnboundChatUrl(url)
+      ? isUnboundChatUrl(tab.url)
+      : isCompatibleChatGptTargetUrl(url, tab.url)),
   );
   if (existing?.id !== undefined) {
     await tabs.update(existing.id, { active: true });
@@ -27,6 +54,37 @@ async function openOrActivateChat(tabs: TabGateway, url: string): Promise<{ id?:
   }
   return tabs.create({ url, active: true });
 }
+
+async function findExistingChat(
+  tabs: TabGateway, url: string, preferredTabId: number | undefined, excludedTabId: number,
+): Promise<{ id?: number; url?: string } | null> {
+  if (preferredTabId !== undefined && preferredTabId !== excludedTabId && tabs.get) {
+    const preferred = await tabs.get(preferredTabId).catch(() => null);
+    if (preferred?.url && isCompatibleChatGptTargetUrl(url, preferred.url)) return { id: preferredTabId, url: preferred.url };
+  }
+  return (await tabs.query?.({ url: 'https://chatgpt.com/*' }))?.find((tab) =>
+    tab.id !== undefined && tab.id !== excludedTabId && tab.url && isCompatibleChatGptTargetUrl(url, tab.url),
+  ) ?? null;
+}
+
+async function waitForReadyTarget(tabs: TabGateway, tabId: number, targetConversationUrl: string): Promise<void> {
+  let lastError = '共享追问空间尚未就绪';
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      const response = await tabs.sendMessage(tabId, { type: 'pointask:ping', targetConversationUrl }) as {
+        ready?: boolean; composerReady?: boolean; conversationUrl?: string;
+      } | undefined;
+      if (response?.ready && response.composerReady && response.conversationUrl &&
+        isCompatibleChatGptTargetUrl(targetConversationUrl, response.conversationUrl)) return;
+      lastError = response?.conversationUrl && !isCompatibleChatGptTargetUrl(targetConversationUrl, response.conversationUrl)
+        ? '共享追问空间 URL 不匹配' : '共享追问空间输入框尚未就绪';
+    } catch (error) { lastError = error instanceof Error ? error.message : lastError; }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(lastError);
+}
+
+const activeWorkspaceAttempts = new Map<string, string>();
 
 interface RuntimeDependencies {
   coordinator: PendingAssociationCoordinator;
@@ -36,6 +94,7 @@ interface RuntimeDependencies {
   settingsStore?: SettingsStore;
   workspaceStore?: WorkspaceStore;
   navigationStore?: NavigationStore;
+  threadReturnStore?: ThreadReturnStore;
 }
 
 const coordinator = new PendingAssociationCoordinator();
@@ -49,12 +108,15 @@ const dependencies: RuntimeDependencies = {
   settingsStore: new SettingsStore(storageDriver),
   workspaceStore: new WorkspaceStore(storageDriver),
   navigationStore: new NavigationStore(storageDriver),
+  threadReturnStore: new ThreadReturnStore(storageDriver),
 };
 
 async function persist(record: PendingAssociation, deps: RuntimeDependencies): Promise<void> {
+  const { targetTabId: _transientTargetTabId, ...storedPendingThread } = record.pendingThread;
+  void _transientTargetTabId;
   await Promise.all([
     deps.threadStore?.upsert(record.localThread),
-    deps.pendingStore?.upsert(record.pendingThread),
+    deps.pendingStore?.upsert(storedPendingThread),
   ]);
   if (record.localThread.answerMode === 'workspace' && record.localThread.workspaceId && record.targetConversationUrl) {
     const workspace = await deps.workspaceStore?.get(record.localThread.workspaceId);
@@ -67,29 +129,19 @@ async function persist(record: PendingAssociation, deps: RuntimeDependencies): P
   }
 }
 
+export async function handleTargetTabRemoved(tabId: number, deps: RuntimeDependencies = dependencies): Promise<void> {
+  const records = deps.coordinator.clearTargetTab(tabId);
+  await Promise.all(records.map(async (record) => {
+    await persist(record, deps);
+    await notify(record, deps.tabs);
+  }));
+}
+
 async function notify(record: PendingAssociation, tabs: TabGateway): Promise<void> {
   const tabIds = new Set([record.sourceTabId, record.targetTabId].filter((id): id is number => id !== undefined));
   await Promise.all([...tabIds].map((tabId) =>
     tabs.sendMessage(tabId, { type: 'pointask:pending-thread-updated', record }).catch(() => undefined),
   ));
-}
-
-async function deliverExplicitSend(tabs: TabGateway, tabId: number, record: PendingAssociation): Promise<void> {
-  let lastError = '目标页面尚未准备好';
-  for (let attempt = 0; attempt < 300; attempt++) {
-    try {
-      const response = await tabs.sendMessage(tabId, {
-        type: 'pointask:execute-pending-send', pendingThreadId: record.pendingThread.id, record,
-      }) as { ok?: boolean; error?: string } | undefined;
-      if (response?.ok) return;
-      if (response?.error) throw new Error(response.error);
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : lastError;
-      if (/发送失败|不匹配|已经发送/.test(lastError)) break;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(lastError === '目标页面尚未准备好' ? '追问空间暂时无法发送，请重试' : lastError);
 }
 
 function senderMatchesSource(senderUrl: string | undefined, sourceConversationKey: string): boolean {
@@ -155,13 +207,62 @@ export async function handleRuntimeMessage(
       case 'pointask:open-target-chat': {
         const existing = await ensureSourceRecord(message.pendingThreadId, senderTabId, sender.tab?.url, deps);
         if (!existing || existing.sourceTabId !== senderTabId) throw new Error('Pending thread not found for source tab');
-        const tab = await deps.tabs.create({ url: 'https://chatgpt.com/', active: true });
+        const tab = await openOrActivateChat(deps.tabs, 'https://chatgpt.com/');
         if (tab.id === undefined) throw new Error('Target tab could not be created');
-        const record = deps.coordinator.markTargetOpened(message.pendingThreadId, tab.id, tab.url || 'https://chatgpt.com/');
+        const record = deps.coordinator.markTargetOpened(message.pendingThreadId, tab.id, resolvedTargetUrl(tab, 'https://chatgpt.com/'));
         if (!record) throw new Error('Pending thread could not be updated');
         await persist(record, deps);
         await notify(record, deps.tabs);
         return { ok: true, data: record };
+      }
+      case 'pointask:open-or-auto-send-workspace': {
+        const existing = await ensureSourceRecord(message.pendingThreadId, senderTabId, sender.tab?.url, deps);
+        if (!existing || existing.sourceTabId !== senderTabId || existing.localThread.answerMode !== 'workspace' ||
+          !existing.pendingThread.promptHash || existing.pendingThread.promptHash !== message.promptHash ||
+          existing.pendingThread.submittedPromptHash === message.promptHash) {
+          throw new Error(existing?.pendingThread.submittedPromptHash === message.promptHash
+            ? '该问题已经发送' : '当前共享追问线程无法发送');
+        }
+        if (activeWorkspaceAttempts.has(message.pendingThreadId)) throw new Error('该问题正在处理，请勿重复点击');
+        activeWorkspaceAttempts.set(message.pendingThreadId, message.attemptId);
+        try {
+          const requestedUrl = existing.targetConversationUrl;
+          const reusable = requestedUrl
+            ? await findExistingChat(deps.tabs, requestedUrl, existing.targetTabId, senderTabId)
+            : null;
+          const tab = reusable ?? await deps.tabs.create({ url: requestedUrl ?? 'https://chatgpt.com/', active: true });
+          if (tab.id === undefined) throw new Error('无法打开共享追问空间');
+          if (reusable) await deps.tabs.update(tab.id, { active: true });
+          const targetUrl = resolvedTargetUrl(tab, requestedUrl ?? 'https://chatgpt.com/');
+          const routed = deps.coordinator.markTargetOpened(message.pendingThreadId, tab.id, targetUrl);
+          if (!routed) throw new Error('共享追问空间绑定失败');
+          await persist(routed, deps); await notify(routed, deps.tabs);
+          if (!reusable) return { ok: true, data: { record: routed, autoSent: false } };
+
+          try {
+            await waitForReadyTarget(deps.tabs, tab.id, targetUrl);
+            const response = await deps.tabs.sendMessage(tab.id, {
+              type: 'pointask:execute-pending-send', record: routed, promptHash: message.promptHash, attemptId: message.attemptId,
+            }) as { ok?: boolean; attemptId?: string; error?: string } | undefined;
+            if (!response?.ok || response.attemptId !== message.attemptId) throw new Error(response?.error || '目标页面未确认发送');
+            const submitted = deps.coordinator.get(message.pendingThreadId);
+            if (!submitted || submitted.pendingThread.submittedPromptHash !== message.promptHash) throw new Error('发送状态未确认');
+            await persist(submitted, deps);
+            return { ok: true, data: { record: submitted, autoSent: true } };
+          } catch (error) {
+            const submitted = deps.coordinator.get(message.pendingThreadId);
+            if (submitted?.pendingThread.submittedPromptHash === message.promptHash) {
+              return { ok: true, data: { record: submitted, autoSent: true } };
+            }
+            const failed = deps.coordinator.markSendFailed(message.pendingThreadId);
+            if (failed) { await persist(failed, deps); await notify(failed, deps.tabs); }
+            throw error;
+          }
+        } finally {
+          if (activeWorkspaceAttempts.get(message.pendingThreadId) === message.attemptId) {
+            activeWorkspaceAttempts.delete(message.pendingThreadId);
+          }
+        }
       }
       case 'pointask:open-workspace-context-update': {
         const workspace = await deps.workspaceStore?.get(message.workspaceId);
@@ -203,43 +304,11 @@ export async function handleRuntimeMessage(
         }
         tab ??= await openOrActivateChat(deps.tabs, existing.targetConversationUrl);
         if (tab.id === undefined) throw new Error('Associated page could not be opened');
-        const record = deps.coordinator.markTargetOpened(message.pendingThreadId, tab.id, tab.url ?? existing.targetConversationUrl);
+        const record = deps.coordinator.markTargetOpened(message.pendingThreadId, tab.id, resolvedTargetUrl(tab, existing.targetConversationUrl));
         if (!record) throw new Error('Associated page could not be activated');
         await persist(record, deps);
         await notify(record, deps.tabs);
         return { ok: true, data: record };
-      }
-      case 'pointask:send-pending-prompt': {
-        const existing = await ensureSourceRecord(message.pendingThreadId, senderTabId, sender.tab?.url, deps);
-        if (!existing || existing.sourceTabId !== senderTabId || existing.localThread.answerMode === 'current_conversation' ||
-          existing.pendingThread.submittedPromptHash === existing.pendingThread.promptHash) {
-          throw new Error(existing?.pendingThread.submittedPromptHash === existing?.pendingThread.promptHash
-            ? '该问题已经发送' : '当前线程无法发送，请刷新后重试');
-        }
-        const requestedUrl = existing.targetConversationUrl;
-        const tab = requestedUrl
-          ? await openOrActivateChat(deps.tabs, requestedUrl)
-          : await deps.tabs.create({ url: 'https://chatgpt.com/', active: true });
-        if (tab.id === undefined) throw new Error('无法打开追问空间，请重试');
-        const routed = deps.coordinator.markTargetOpened(message.pendingThreadId, tab.id, tab.url ?? requestedUrl ?? 'https://chatgpt.com/');
-        if (!routed || routed.pendingThread.id !== message.pendingThreadId) throw new Error('当前页面与线程不匹配');
-        await persist(routed, deps); await notify(routed, deps.tabs);
-        try {
-          await deliverExplicitSend(deps.tabs, tab.id, routed);
-        } catch (error) {
-          const current = deps.coordinator.get(message.pendingThreadId);
-          if (current?.pendingThread.submittedPromptHash === current?.pendingThread.promptHash) return { ok: true, data: current };
-          const failed = deps.coordinator.markSendFailed(message.pendingThreadId);
-          if (failed) { await persist(failed, deps); await notify(failed, deps.tabs); }
-          throw error;
-        }
-        const submitted = deps.coordinator.get(message.pendingThreadId);
-        if (!submitted || submitted.pendingThread.submittedPromptHash !== submitted.pendingThread.promptHash) {
-          const failed = deps.coordinator.markSendFailed(message.pendingThreadId);
-          if (failed) { await persist(failed, deps); await notify(failed, deps.tabs); }
-          throw new Error('发送失败，请重试');
-        }
-        return { ok: true, data: submitted };
       }
       case 'pointask:unlink-target-page': {
         const existing = await ensureSourceRecord(message.pendingThreadId, senderTabId, sender.tab?.url, deps);
@@ -295,19 +364,33 @@ export async function handleRuntimeMessage(
           if (existing.targetTabId !== senderTabId) throw new Error('Only the target tab may return to source');
           const completed = deps.coordinator.completeReturn(message.pendingThreadId, senderTabId);
           if (completed) { await persist(completed, deps); await notify(completed, deps.tabs); }
-          if (existing.sourceTabId < 0) {
-            await deps.tabs.create({ url: existing.pendingThread.sourcePageUrl, active: true });
-            return { ok: true };
+          const sourceUrl = existing.localThread.sourceConversationKey || existing.pendingThread.sourcePageUrl;
+          let sourceTab: { id?: number; url?: string } | null = null;
+          if (existing.sourceTabId >= 0 && deps.tabs.get) {
+            const remembered = await deps.tabs.get(existing.sourceTabId).catch(() => null);
+            if (remembered?.url && isCompatibleChatGptTargetUrl(sourceUrl, remembered.url)) {
+              sourceTab = { id: existing.sourceTabId, url: remembered.url };
+            }
           }
-          if (existing.localThread.answerMode === 'current_conversation' && existing.sourceTabId === existing.targetTabId) {
-            return { ok: true };
+          if (!deps.tabs.get && existing.sourceTabId >= 0) {
+            sourceTab = { id: existing.sourceTabId, url: sourceUrl };
           }
-          const options = existing.sourceTabId === existing.targetTabId
-            ? { active: true, url: existing.pendingThread.sourcePageUrl }
-            : { active: true };
-          await deps.tabs.update(existing.sourceTabId, options);
+          sourceTab ??= (await deps.tabs.query?.({ url: 'https://chatgpt.com/*' }))?.find((tab) =>
+            tab.id !== undefined && tab.url && isCompatibleChatGptTargetUrl(sourceUrl, tab.url),
+          ) ?? null;
+          sourceTab ??= await deps.tabs.create({ url: sourceUrl, active: true });
+          if (sourceTab.id === undefined) throw new Error('无法返回来源页面');
+          await deps.threadReturnStore?.set({
+            id: `pointask-thread-return-${Date.now()}`,
+            threadId: message.pendingThreadId,
+            sourceConversationUrl: sourceUrl,
+            createdAt: new Date().toISOString(),
+          });
+          await deps.tabs.update(sourceTab.id, { active: true });
+          deps.coordinator.restore((completed ?? existing).pendingThread, (completed ?? existing).localThread, sourceTab.id);
+          await deps.tabs.sendMessage(sourceTab.id, { type: 'pointask:thread-return-ready', threadId: message.pendingThreadId }).catch(() => undefined);
           if (completed && settings?.closeDedicatedTabAfterAttach && existing.localThread.answerMode === 'dedicated_branch' &&
-            existing.targetTabId !== undefined && existing.targetTabId !== existing.sourceTabId && deps.tabs.get && deps.tabs.remove) {
+            existing.targetTabId !== undefined && existing.targetTabId !== sourceTab.id && deps.tabs.get && deps.tabs.remove) {
             const target = await deps.tabs.get(existing.targetTabId).catch(() => null);
             if (target && target.active === false) await deps.tabs.remove(existing.targetTabId).catch(() => undefined);
           }
@@ -374,8 +457,16 @@ export async function handleRuntimeMessage(
         const navigation = await deps.navigationStore?.get();
         return { ok: true, data: navigation && isCompatibleChatGptTargetUrl(navigation.locator.conversationUrl, message.currentUrl) ? navigation : null };
       }
+      case 'pointask:get-pending-thread-return': {
+        const navigation = await deps.threadReturnStore?.get();
+        return { ok: true, data: navigation && isCompatibleChatGptTargetUrl(navigation.sourceConversationUrl, message.currentUrl)
+          ? navigation : null };
+      }
       case 'pointask:complete-navigation': {
-        await deps.navigationStore?.clear(message.navigationId);
+        await Promise.all([
+          deps.navigationStore?.clear(message.navigationId),
+          deps.threadReturnStore?.clear(message.navigationId),
+        ]);
         return { ok: true };
       }
       case 'pointask:undo-attachment': {
@@ -415,3 +506,5 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   void handleRuntimeMessage(message, sender).then(sendResponse);
   return true;
 });
+
+chrome.tabs.onRemoved?.addListener((tabId) => { void handleTargetTabRemoved(tabId); });

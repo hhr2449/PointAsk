@@ -10,6 +10,7 @@ export const STORAGE_KEYS = {
   schemaVersion: 'pointask:schema-version',
   metrics: 'pointask:metrics',
   pendingNavigation: 'pointask:pending-navigation',
+  pendingThreadReturn: 'pointask:pending-thread-return',
 } as const;
 
 export interface PointAskSettings {

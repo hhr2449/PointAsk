@@ -73,7 +73,7 @@ describe('rich ChatGPT content', () => {
   });
 
   it('keeps rendered ChatGPT emphasis in RichContent and cards', async () => {
-    document.body.innerHTML = '<p id="formatted">普通 <strong>粗体 <em>粗斜体</em></strong> 和 <del>删除内容</del></p>';
+    document.body.innerHTML = '<p id="formatted">普通 <strong>粗体 <em>粗斜体</em></strong> 和 <del>删除内容</del> <code>代码</code></p>';
     const selection = document.createRange(); selection.selectNodeContents(document.getElementById('formatted')!);
     const rich = extractRichContent(selection);
     expect(rich.blocks).toEqual([{ type: 'paragraph', children: [
@@ -84,6 +84,8 @@ describe('rich ChatGPT content', () => {
       ] },
       { type: 'text', content: ' 和 ' },
       { type: 'strikethrough', children: [{ type: 'text', content: '删除内容' }] },
+      { type: 'text', content: ' ' },
+      { type: 'inline_code', content: '代码' },
     ] }]);
     const container = document.createElement('div'); const root = createRoot(container);
     await act(() => root.render(<RichContentRenderer blocks={rich.blocks} />));
@@ -91,10 +93,14 @@ describe('rich ChatGPT content', () => {
     expect(container.querySelector('strong')?.tagName).toBe('STRONG');
     expect(container.querySelector('strong em')?.textContent).toBe('粗斜体');
     expect(container.querySelector('del')?.textContent).toBe('删除内容');
+    expect(container.querySelector('p')?.textContent).toBe('普通 粗体 粗斜体 和 删除内容 代码');
     expect(richContentStyles).toContain('.pointask-rich-content strong,');
     expect(richContentStyles).toContain('font-size: inherit; line-height: inherit; font-family: inherit; letter-spacing: inherit; font-weight: 600;');
+    expect(richContentStyles).toContain('.pointask-rich-content :is(strong, b) span');
     expect(threadStyles).toContain('.pointask-message > strong { font-size: 12px; }');
     expect(threadStyles).toContain('.pointask-selection > strong { font-size: 12px; }');
+    expect(threadStyles).toContain('.pointask-round-question { padding: 10px 11px; border-radius: 10px; background: var(--pa-bg-subtle); }');
+    expect(threadStyles).toContain('.pointask-round-answer-label::before { content: "◦";');
     expect(threadStyles).not.toContain('.pointask-message strong { font-size: 12px; }');
     expect(threadStyles).not.toContain('.pointask-selection strong { font-size: 12px; }');
     await act(() => root.unmount());
@@ -211,6 +217,21 @@ describe('explicit composer fill and candidate matching', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it('fills a hydrated contenteditable composer through its native editing path', () => {
+    document.body.innerHTML = '<div id="prompt-textarea" class="ProseMirror" contenteditable="true"><p>旧草稿</p></div><button data-testid="send-button">发送</button>';
+    const execCommand = vi.fn((_command: string, _showUi: boolean, value: string) => {
+      document.getElementById('prompt-textarea')!.textContent = value;
+      return true;
+    });
+    Object.defineProperty(document, 'execCommand', { configurable: true, value: execCommand });
+    const send = vi.spyOn(document.querySelector<HTMLButtonElement>('[data-testid="send-button"]')!, 'click');
+    expect(new ChatGptAdapter().fillComposer('共享空间继续追问')).toBe(true);
+    expect(execCommand).toHaveBeenCalledWith('insertText', false, '共享空间继续追问');
+    expect(document.getElementById('prompt-textarea')?.textContent).toBe('共享空间继续追问');
+    expect(send).not.toHaveBeenCalled();
+    delete (document as { execCommand?: unknown }).execCommand;
+  });
+
   it('submits only when the explicit submit operation is invoked and refuses a disabled button', () => {
     document.body.innerHTML = '<div id="prompt-textarea" contenteditable="true"></div><button data-testid="send-button">发送</button>';
     const adapter = new ChatGptAdapter(); const button = document.querySelector<HTMLButtonElement>('[data-testid="send-button"]')!;
@@ -218,6 +239,29 @@ describe('explicit composer fill and candidate matching', () => {
     expect(click).not.toHaveBeenCalled(); expect(adapter.canSubmitComposer()).toBe(true);
     expect(adapter.submitComposer()).toBe(true); expect(click).toHaveBeenCalledOnce();
     button.disabled = true; expect(adapter.submitComposer()).toBe(false); expect(click).toHaveBeenCalledOnce();
+  });
+
+  it('confirms submission only from an exact rendered user turn', () => {
+    const prompt = '[PointAsk 局部线程：PA-009]\n\n我的问题：\n确认发送了吗？';
+    const promptHash = stableTextHash(prompt);
+    document.body.innerHTML = `<article data-testid="conversation-turn-user-proof"><div data-message-author-role="user"><div class="markdown"><p>${prompt}</p><button>复制</button></div></div></article>`;
+    const adapter = new ChatGptAdapter();
+    expect(adapter.hasSubmittedPrompt(promptHash)).toBe(true);
+    expect(adapter.hasSubmittedPrompt(stableTextHash('另一个问题'))).toBe(false);
+  });
+
+  it('waits for composer readiness from DOM changes instead of assuming a delay is enough', async () => {
+    document.body.innerHTML = '';
+    const adapter = new ChatGptAdapter();
+    const composerReady = adapter.waitForComposerReady(1_000);
+    const composer = document.createElement('div'); composer.id = 'prompt-textarea'; composer.contentEditable = 'true';
+    document.body.append(composer);
+    expect(await composerReady).toBe(true);
+
+    const submitReady = adapter.waitForSubmitReady(1_000);
+    const button = document.createElement('button'); button.dataset.testid = 'send-button'; button.disabled = true; document.body.append(button);
+    button.disabled = false;
+    expect(await submitReady).toBe(true);
   });
 
   it('returns only the assistant immediately following the matching prompt', () => {

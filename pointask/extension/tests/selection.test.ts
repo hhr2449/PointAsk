@@ -45,6 +45,12 @@ describe('ChatGPT selection boundary', () => {
     expect(readSelection(adapter, fakeSelection(null))).toBeNull();
   });
 
+  it('rejects a whitespace-only selection', () => {
+    document.body.innerHTML = '<article data-testid="conversation-turn-whitespace"><div data-message-author-role="assistant"><div class="markdown"><p id="whitespace"> \n\t </p></div></div></article>';
+    const whitespace = document.getElementById('whitespace')!.firstChild as Text;
+    expect(readSelection(adapter, fakeSelection(rangeBetween(whitespace, 0)))).toBeNull();
+  });
+
   it('rejects ordinary page text', () => {
     const range = rangeBetween(text('ordinary'), 0);
     expect(readSelection(adapter, fakeSelection(range))).toBeNull();

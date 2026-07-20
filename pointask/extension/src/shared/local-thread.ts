@@ -133,4 +133,5 @@ export interface LocalThread {
   createdAt: string;
   updatedAt: string;
   expanded?: boolean;
+  collapsedRoundIds?: string[];
 }

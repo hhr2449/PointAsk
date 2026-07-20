@@ -127,11 +127,16 @@ describe('mode navigation behavior', () => {
     const threadStore = new ThreadStore(driver); const workspaceStore = new WorkspaceStore(driver);
     const calls: Array<{ type: string }> = [];
     let currentLocal: LocalThread | undefined;
-    const runtime = { sendMessage: vi.fn().mockImplementation((message: { type: string; localThread?: LocalThread; targetUrl?: string }) => {
-      calls.push(message); if (message.localThread) currentLocal = message.localThread;
+    let currentPending: import('../src/bridge/pending-thread-manager').PendingThread | undefined;
+    const runtime = { sendMessage: vi.fn().mockImplementation((message: {
+      type: string; localThread?: LocalThread; pendingThread?: import('../src/bridge/pending-thread-manager').PendingThread; targetUrl?: string;
+    }) => {
+      calls.push(message); if (message.localThread) currentLocal = message.localThread; if (message.pendingThread) currentPending = message.pendingThread;
       if (message.type === 'pointask:associate-target-page' && currentLocal) currentLocal = { ...currentLocal, targetConversationUrl: message.targetUrl };
-      return Promise.resolve({ ok: true, data: { pendingThread: {}, localThread: currentLocal, sourceTabId: 1, targetTabId: 1,
-        targetConversationUrl: currentLocal?.targetConversationUrl, associationStatus: 'associated', createdAt: now, updatedAt: now } });
+      const record = { pendingThread: currentPending, localThread: currentLocal, sourceTabId: 1, targetTabId: 1,
+        targetConversationUrl: currentLocal?.targetConversationUrl, associationStatus: 'associated', createdAt: now, updatedAt: now };
+      return Promise.resolve({ ok: true, data: message.type === 'pointask:open-or-auto-send-workspace'
+        ? { record, autoSent: false } : record });
     }) };
     const writeText = vi.fn().mockResolvedValue(undefined);
     const pendingManager = new PendingThreadManager();
@@ -148,8 +153,10 @@ describe('mode navigation behavior', () => {
       workspaceType: 'new_conversation', threadCount: 0, approximateContentLength: 0, createdAt: now, updatedAt: now,
       contextState: { contextVersion: 1, unsyncedMessageCount: 0, unsyncedTurnCount: 0, status: 'unknown' } });
     const workspaceId = await manager.create(selectionData(), 'Workspace 问题', 'workspace');
-    await manager.startAnswerFlow(workspaceId!);
+    await manager.confirmAnswerModeAndSend(workspaceId!);
+    expect(calls.some((call) => call.type === 'pointask:open-or-auto-send-workspace')).toBe(true);
     expect(calls.some((call) => call.type === 'pointask:open-answer-page')).toBe(false);
+    expect(calls.some((call) => call.type === 'pointask:reserve-prompt-submission')).toBe(false);
     expect(manager.getThread(workspaceId!)?.workspaceId).toBe('workspace');
 
     const dedicatedId = await manager.create(selectionData(), '独立分支问题', 'dedicated_branch');

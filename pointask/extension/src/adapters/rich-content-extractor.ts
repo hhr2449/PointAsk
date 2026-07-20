@@ -85,7 +85,10 @@ function listItem(element: Element): RichContentBlock {
 function extractNode(node: Node): RichContentBlock[] {
   if (node.nodeType === Node.TEXT_NODE) {
     const content = node.textContent ?? '';
-    return !content || /^\s+$/.test(content) ? [] : [{ type: 'text', content }];
+    // Keep whitespace here so normalization can retain meaningful separators
+    // between inline nodes (for example </strong> <code>). Structural
+    // indentation and whitespace-only selections are discarded later.
+    return content ? [{ type: 'text', content }] : [];
   }
   if (!(node instanceof Element) && !(node instanceof DocumentFragment)) return [];
   if (node instanceof DocumentFragment) return children(node);

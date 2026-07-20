@@ -98,6 +98,11 @@ if (adapter.isSupportedPage()) {
   void banner.start().catch(() => undefined);
   let recoveryRetryTimer: ReturnType<typeof setTimeout> | null = null;
   const recoveryAttempts = new Map<string, number>();
+  const revealReturnedThread = async (): Promise<void> => {
+    const navigation = await webBridge.getPendingThreadReturn().catch(() => null);
+    if (!navigation || !threads.reveal(navigation.threadId)) return;
+    await webBridge.completeNavigation(navigation.id).catch(() => undefined);
+  };
   let restoreInProgress = false;
   let restoreQueued = false;
   const restoreSourceThreads = async (): Promise<void> => {
@@ -128,6 +133,7 @@ if (adapter.isSupportedPage()) {
         if (resolution.status === 'orphaned' && attempts === 12) void metrics.increment('anchorsFailed');
       }
     }
+    await revealReturnedThread();
     } finally {
       restoreInProgress = false;
       if (restoreQueued) { restoreQueued = false; void restoreSourceThreads().catch(() => undefined); }
@@ -154,6 +160,7 @@ if (adapter.isSupportedPage()) {
   lifecycle.start();
   void threads.refreshWorkspaceContextProgress().catch(() => undefined);
   webBridge.onPendingUpdated((record) => threads.handleAssociationUpdate(record));
+  webBridge.onThreadReturnReady(() => { void restoreSourceThreads().then(revealReturnedThread).catch(() => undefined); });
   const toolbar = new SelectionToolbar({
     onFollowUp: (selection) => {
       const data = hydrateSelectionContext(adapter, selection);

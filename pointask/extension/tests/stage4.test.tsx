@@ -9,6 +9,7 @@ import { PendingBannerManager } from '../src/content/pending-banner-manager';
 import { MemoryStorageDriver } from '../src/storage/storage-driver';
 import { ThreadStore } from '../src/storage/thread-store';
 import { PendingStore } from '../src/storage/pending-store';
+import { ThreadReturnStore } from '../src/storage/navigation-store';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -40,9 +41,9 @@ describe('runtime validation', () => {
     expect(isPointAskRuntimeMessage({ type: 'pointask:create-pending-thread', pendingThread: pending() })).toBe(true);
     expect(isPointAskRuntimeMessage({ type: 'pointask:open-target-chat', pendingThreadId: '' })).toBe(false);
     expect(isPointAskRuntimeMessage({ type: 'pointask:cancel-pending-thread', pendingThreadId: 'id', extra: true })).toBe(false);
-    expect(isPointAskRuntimeMessage({ type: 'pointask:send-pending-prompt', pendingThreadId: 'thread-id' })).toBe(true);
-    expect(isPointAskRuntimeMessage({ type: 'pointask:release-prompt-submission', pendingThreadId: 'thread-id', promptHash: 'hash' })).toBe(true);
-    expect(isPointAskRuntimeMessage({ type: 'pointask:send-pending-prompt', pendingThreadId: 'thread-id', targetUrl: 'javascript:alert(1)' })).toBe(false);
+    expect(isPointAskRuntimeMessage({
+      type: 'pointask:open-or-auto-send-workspace', pendingThreadId: 'id', promptHash: 'hash', attemptId: 'attempt',
+    })).toBe(true);
     expect(isPointAskRuntimeMessage({
       type: 'pointask:associate-target-page', pendingThreadId: 'id', targetUrl: 'https://example.com/',
     })).toBe(false);
@@ -166,7 +167,9 @@ describe('service worker routing', () => {
     coordinator.create(pending(), 10); coordinator.markTargetOpened(pending().id, 30, 'https://chatgpt.com/c/target');
     coordinator.attachAnswer(pending().id, 30, '回答', 'https://chatgpt.com/c/target', false);
     const tabs = { create: vi.fn(), update: vi.fn().mockResolvedValue({}), sendMessage: vi.fn().mockResolvedValue({}),
-      get: vi.fn().mockResolvedValue({ active: false }), remove: vi.fn().mockResolvedValue(undefined) };
+      get: vi.fn().mockImplementation((tabId: number) => Promise.resolve(tabId === 10
+        ? { id: 10, url: 'https://chatgpt.com/c/source', active: false }
+        : { id: 30, url: 'https://chatgpt.com/c/target', active: false })), remove: vi.fn().mockResolvedValue(undefined) };
     const settingsStore = { get: vi.fn().mockResolvedValue({ pendingExpiryHours: 24, closeDedicatedTabAfterAttach: true }) };
     const result = await handleRuntimeMessage({ type: 'pointask:pending-thread-updated', pendingThreadId: pending().id, action: 'return-source' },
       { tab: { id: 30, url: 'https://chatgpt.com/c/target' } }, { coordinator, tabs, settingsStore } as never);
@@ -184,7 +187,7 @@ describe('service worker routing', () => {
       { tab: { id: 10, url: 'https://chatgpt.com/c/source' } }, { coordinator, tabs });
     expect(result.ok).toBe(true);
     expect(coordinator.get(current.id)?.associationStatus).toBe('completed');
-    expect(tabs.update).not.toHaveBeenCalled();
+    expect(tabs.update).toHaveBeenCalledWith(10, { active: true });
     expect(tabs.create).not.toHaveBeenCalled();
   });
 
@@ -214,87 +217,74 @@ describe('service worker routing', () => {
     expect(coordinator.get(pending().id)?.targetTabId).toBe(44);
   });
 
-  it('sends a Workspace prompt from the source click through the exact target tab and thread once', async () => {
+  it('automatically sends once only when the matching Workspace tab already exists', async () => {
     const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
-    const workspacePending = { ...pending('workspace-send'), answerMode: 'workspace' as const, workspaceId: 'workspace-one', promptHash: 'hash-workspace' };
-    coordinator.create(workspacePending, 10);
-    coordinator.markTargetOpened(workspacePending.id, 20, 'https://chatgpt.com/c/workspace');
+    const workspace = { ...pending('workspace-existing'), answerMode: 'workspace' as const, workspaceId: 'workspace', promptHash: 'hash-existing' };
+    coordinator.create(workspace, 10); coordinator.markTargetOpened(workspace.id, 20, 'https://chatgpt.com/c/workspace');
+    let executions = 0;
     const tabs = {
-      query: vi.fn().mockResolvedValue([{ id: 44, url: 'https://chatgpt.com/c/workspace' }]),
-      update: vi.fn().mockResolvedValue({}), create: vi.fn(),
-      sendMessage: vi.fn().mockImplementation((tabId: number, message: { type?: string; pendingThreadId?: string }) => {
+      get: vi.fn().mockResolvedValue({ id: 20, url: 'https://chatgpt.com/c/workspace' }), query: vi.fn(),
+      create: vi.fn(), update: vi.fn().mockResolvedValue({}),
+      sendMessage: vi.fn().mockImplementation((tabId: number, message: { type?: string; record?: { pendingThread: PendingThread }; attemptId?: string }) => {
+        if (message.type === 'pointask:ping') return Promise.resolve({
+          ready: true, composerReady: true, conversationUrl: 'https://chatgpt.com/c/workspace',
+        });
         if (message.type === 'pointask:execute-pending-send') {
-          const submitted = coordinator.reserveSubmission(message.pendingThreadId!, tabId, 'hash-workspace', 'https://chatgpt.com/c/workspace');
-          return Promise.resolve({ ok: Boolean(submitted) });
+          executions += 1;
+          coordinator.reserveSubmission(workspace.id, tabId, 'hash-existing', 'https://chatgpt.com/c/workspace');
+          return Promise.resolve({ ok: true, attemptId: message.attemptId });
         }
         return Promise.resolve({});
       }),
     };
-    const result = await handleRuntimeMessage({ type: 'pointask:send-pending-prompt', pendingThreadId: workspacePending.id },
-      { tab: { id: 10, url: 'https://chatgpt.com/c/source' } }, { coordinator, tabs });
+    const result = await handleRuntimeMessage({
+      type: 'pointask:open-or-auto-send-workspace', pendingThreadId: workspace.id,
+      promptHash: 'hash-existing', attemptId: 'attempt-existing',
+    }, { tab: { id: 10, url: 'https://chatgpt.com/c/source' } }, { coordinator, tabs });
+    expect(result).toMatchObject({ ok: true, data: { autoSent: true } });
+    expect(tabs.create).not.toHaveBeenCalled();
+    expect(executions).toBe(1);
+    expect(coordinator.get(workspace.id)?.pendingThread.submittedPromptHash).toBe('hash-existing');
+  });
+
+  it('opens a missing Workspace tab but never fills or sends after creating it', async () => {
+    const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
+    const workspace = { ...pending('workspace-missing'), answerMode: 'workspace' as const, workspaceId: 'workspace', promptHash: 'hash-missing' };
+    coordinator.create(workspace, 10); coordinator.markTargetOpened(workspace.id, 20, 'https://chatgpt.com/c/workspace');
+    const tabs = {
+      get: vi.fn().mockRejectedValue(new Error('closed')), query: vi.fn().mockResolvedValue([]),
+      create: vi.fn().mockResolvedValue({ id: 55, url: 'about:blank', pendingUrl: 'https://chatgpt.com/c/workspace' }),
+      update: vi.fn(), sendMessage: vi.fn().mockResolvedValue({}),
+    };
+    const result = await handleRuntimeMessage({
+      type: 'pointask:open-or-auto-send-workspace', pendingThreadId: workspace.id,
+      promptHash: 'hash-missing', attemptId: 'attempt-missing',
+    }, { tab: { id: 10, url: 'https://chatgpt.com/c/source' } }, { coordinator, tabs });
+    expect(result).toMatchObject({ ok: true, data: { autoSent: false } });
+    expect(tabs.create).toHaveBeenCalledWith({ url: 'https://chatgpt.com/c/workspace', active: true });
+    expect(tabs.sendMessage).not.toHaveBeenCalledWith(55, expect.objectContaining({ type: 'pointask:ping' }));
+    expect(tabs.sendMessage).not.toHaveBeenCalledWith(55, expect.objectContaining({ type: 'pointask:execute-pending-send' }));
+    expect(coordinator.get(workspace.id)?.pendingThread.submittedPromptHash).toBeUndefined();
+  });
+
+  it('falls back from a stale sourceTabId to an existing source URL and stores exact card return navigation', async () => {
+    const driver = new MemoryStorageDriver(); const threadReturnStore = new ThreadReturnStore(driver);
+    const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
+    coordinator.create(pending('return-existing-source'), 10);
+    coordinator.markTargetOpened('return-existing-source', 30, 'https://chatgpt.com/c/target');
+    const tabs = {
+      get: vi.fn().mockRejectedValue(new Error('source closed')),
+      query: vi.fn().mockResolvedValue([{ id: 44, url: 'https://chatgpt.com/c/source' }]),
+      create: vi.fn(), update: vi.fn().mockResolvedValue({}), sendMessage: vi.fn().mockResolvedValue({}),
+    };
+    const result = await handleRuntimeMessage({
+      type: 'pointask:pending-thread-updated', pendingThreadId: 'return-existing-source', action: 'return-source',
+    }, { tab: { id: 30, url: 'https://chatgpt.com/c/target' } }, { coordinator, tabs, threadReturnStore });
     expect(result.ok).toBe(true);
     expect(tabs.update).toHaveBeenCalledWith(44, { active: true });
     expect(tabs.create).not.toHaveBeenCalled();
-    expect(tabs.sendMessage).toHaveBeenCalledWith(44, expect.objectContaining({
-      type: 'pointask:execute-pending-send', pendingThreadId: workspacePending.id,
-    }));
-    expect(coordinator.get(workspacePending.id)?.localThread.status).toBe('waiting_for_answer');
-    const duplicate = await handleRuntimeMessage({ type: 'pointask:send-pending-prompt', pendingThreadId: workspacePending.id },
-      { tab: { id: 10, url: 'https://chatgpt.com/c/source' } }, { coordinator, tabs });
-    expect(duplicate).toMatchObject({ ok: false, error: '该问题已经发送' });
-  });
-
-  it('keeps a failed Workspace question and thread retryable without submitting on recovery', async () => {
-    const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
-    const workspacePending = { ...pending('workspace-retry'), answerMode: 'workspace' as const, workspaceId: 'workspace-one', promptHash: 'hash-retry' };
-    coordinator.create(workspacePending, 10);
-    coordinator.markTargetOpened(workspacePending.id, 20, 'https://chatgpt.com/c/workspace');
-    let shouldFail = true;
-    const tabs = {
-      query: vi.fn().mockResolvedValue([{ id: 20, url: 'https://chatgpt.com/c/workspace' }]),
-      update: vi.fn().mockResolvedValue({}), create: vi.fn(),
-      sendMessage: vi.fn().mockImplementation((tabId: number, message: { type?: string; pendingThreadId?: string }) => {
-        if (message.type !== 'pointask:execute-pending-send') return Promise.resolve({});
-        if (shouldFail) return Promise.resolve({ ok: false, error: '发送失败，请重试' });
-        return Promise.resolve({ ok: Boolean(coordinator.reserveSubmission(message.pendingThreadId!, tabId, 'hash-retry', 'https://chatgpt.com/c/workspace')) });
-      }),
-    };
-    const first = await handleRuntimeMessage({ type: 'pointask:send-pending-prompt', pendingThreadId: workspacePending.id },
-      { tab: { id: 10, url: 'https://chatgpt.com/c/source' } }, { coordinator, tabs });
-    expect(first.ok).toBe(false);
-    expect(coordinator.get(workspacePending.id)).toMatchObject({
-      pendingThread: { question: workspacePending.question, status: 'failed' },
-      localThread: { id: workspacePending.id, status: 'failed' },
-    });
-    expect(coordinator.get(workspacePending.id)?.pendingThread.submittedPromptHash).toBeUndefined();
-
-    shouldFail = false;
-    const retried = await handleRuntimeMessage({ type: 'pointask:send-pending-prompt', pendingThreadId: workspacePending.id },
-      { tab: { id: 10, url: 'https://chatgpt.com/c/source' } }, { coordinator, tabs });
-    expect(retried.ok).toBe(true);
-    expect(coordinator.get(workspacePending.id)?.pendingThread.submittedPromptHash).toBe('hash-retry');
-  });
-
-  it('creates the first Workspace conversation from the explicit mode confirmation when none is associated yet', async () => {
-    const coordinator = new PendingAssociationCoordinator(() => new Date('2026-07-12T01:00:00.000Z'));
-    const workspacePending = { ...pending('workspace-first-send'), answerMode: 'workspace' as const, workspaceId: 'workspace-new', promptHash: 'hash-first' };
-    coordinator.create(workspacePending, 10);
-    const tabs = {
-      create: vi.fn().mockResolvedValue({ id: 55, url: 'https://chatgpt.com/' }), update: vi.fn(), query: vi.fn(),
-      sendMessage: vi.fn().mockImplementation((tabId: number, message: { type?: string; pendingThreadId?: string }) => {
-        if (message.type === 'pointask:execute-pending-send') {
-          const submitted = coordinator.reserveSubmission(message.pendingThreadId!, tabId, 'hash-first', 'https://chatgpt.com/');
-          return Promise.resolve({ ok: Boolean(submitted) });
-        }
-        return Promise.resolve({});
-      }),
-    };
-    const result = await handleRuntimeMessage({ type: 'pointask:send-pending-prompt', pendingThreadId: workspacePending.id },
-      { tab: { id: 10, url: 'https://chatgpt.com/c/source' } }, { coordinator, tabs });
-    expect(result.ok).toBe(true);
-    expect(tabs.create).toHaveBeenCalledWith({ url: 'https://chatgpt.com/', active: true });
-    expect(tabs.query).not.toHaveBeenCalled();
-    expect(coordinator.get(workspacePending.id)).toMatchObject({ targetTabId: 55, targetConversationUrl: 'https://chatgpt.com/' });
+    expect(await threadReturnStore.get()).toMatchObject({ threadId: 'return-existing-source', sourceConversationUrl: 'https://chatgpt.com/c/source' });
+    expect(tabs.sendMessage).toHaveBeenCalledWith(44, { type: 'pointask:thread-return-ready', threadId: 'return-existing-source' });
   });
 
   it('does not activate a remembered tab after it navigated away from the associated conversation', async () => {

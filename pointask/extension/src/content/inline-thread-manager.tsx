@@ -68,6 +68,7 @@ export class InlineThreadManager {
   private readonly viewAnchors = new Map<string, ViewAnchorController>();
   private readonly highlightTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly sendingIds = new Set<string>();
+  private readonly openingTargetIds = new Set<string>();
   private readonly menuOverlayHost: HTMLElement;
   private readonly menuOverlay: HTMLElement;
   private workspaceContextHandler: ((workspace: PointAskWorkspace, threadId: string) => void) | null = null;
@@ -216,7 +217,7 @@ export class InlineThreadManager {
     if (!(await this.startAnswerFlow(id))) return false;
     const mode = this.mounted.get(id)?.thread.answerMode;
     if (mode === 'current_conversation') return this.sendCurrentConversation(id);
-    return this.sendAssociatedConversation(id);
+    return this.copyAndOpenTarget(id);
   }
 
   private async recordSendFailure(id: string, error: unknown): Promise<void> {
@@ -294,6 +295,27 @@ export class InlineThreadManager {
     this.stabilizeCardPosition(id, viewportTop);
   }
 
+  async toggleRound(id: string, roundId: string): Promise<void> {
+    const item = this.mounted.get(id);
+    if (!item) return;
+    const viewportTop = item.host.getBoundingClientRect().top;
+    const thread = item.thread;
+    const userRoundIds = thread.messages.filter((message) => message.role === 'user').map((message) => message.id);
+    const collapsed = new Set(thread.collapsedRoundIds ?? userRoundIds.slice(0, -1));
+    if (collapsed.has(roundId)) collapsed.delete(roundId);
+    else collapsed.add(roundId);
+    const nextCollapsedRoundIds = [...collapsed].filter((messageId) => userRoundIds.includes(messageId));
+    const timestamp = this.now().toISOString();
+    item.thread = {
+      ...thread,
+      collapsedRoundIds: nextCollapsedRoundIds,
+      updatedAt: timestamp,
+    };
+    await this.threadStore?.upsert(item.thread);
+    this.render(id);
+    this.stabilizeCardPosition(id, viewportTop);
+  }
+
   private stabilizeCardPosition(id: string, viewportTop: number): void {
     const schedule = window.requestAnimationFrame?.bind(window) ?? ((callback: FrameRequestCallback) => window.setTimeout(() => callback(performance.now()), 0));
     schedule(() => {
@@ -330,14 +352,21 @@ export class InlineThreadManager {
   async copyAndOpenTarget(id: string): Promise<boolean> {
     const item = this.mounted.get(id);
     const pending = this.pendingThreads.get(id);
-    if (!item || !pending || !this.webBridge) return false;
+    if (!item || !pending || !this.webBridge || this.openingTargetIds.has(id)) return false;
+    this.openingTargetIds.add(id);
     try {
       await this.webBridge.savePendingThread(pending, item.thread);
-      const record = item.thread.targetConversationUrl
+      const workspaceAttemptId = `pointask-attempt-${typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+      const workspaceResult = item.thread.answerMode === 'workspace'
+        ? await this.webBridge.openOrAutoSendWorkspace(id, pending.promptHash ?? '', workspaceAttemptId)
+        : null;
+      const record = workspaceResult?.record ?? (item.thread.targetConversationUrl
         ? await this.webBridge.openAnswerPage(id)
-        : await this.webBridge.openTargetChat(id);
+        : await this.webBridge.openTargetChat(id));
       const updatedPending = this.pendingThreads.markWaitingForSubmission(id);
-      if (updatedPending) await this.webBridge.savePendingThread(updatedPending, record.localThread);
+      if (updatedPending && !workspaceResult?.autoSent) await this.webBridge.savePendingThread(updatedPending, record.localThread);
+      this.pendingThreads.restore(record.pendingThread);
       item.thread = record.localThread;
       void this.metrics?.increment('targetPagesOpened');
       this.render(id);
@@ -346,7 +375,7 @@ export class InlineThreadManager {
       item.error = error instanceof Error ? error.message : '无法打开目标页面';
       this.render(id);
       return false;
-    }
+    } finally { this.openingTargetIds.delete(id); }
   }
 
   async sendCurrentConversation(id: string): Promise<boolean> {
@@ -370,25 +399,6 @@ export class InlineThreadManager {
         await this.webBridge.releasePromptSubmission(id, pending.promptHash ?? '').catch(() => undefined);
         throw new Error('发送失败，请重试');
       }
-      this.pendingThreads.restore(record.pendingThread); item.thread = record.localThread;
-      void Promise.all([this.threadStore?.upsert(item.thread), this.pendingStore?.upsert(record.pendingThread)]);
-      showOperationToast('已发送'); this.render(id); return true;
-    } catch (error) {
-      await this.recordSendFailure(id, error); return false;
-    } finally { this.sendingIds.delete(id); this.render(id); }
-  }
-
-  async sendAssociatedConversation(id: string): Promise<boolean> {
-    const item = this.mounted.get(id); let pending = this.pendingThreads.get(id);
-    if (!item || !pending || item.thread.answerMode === 'current_conversation' || !this.webBridge || this.sendingIds.has(id)) return false;
-    if (pending.submittedPromptHash === pending.promptHash) { item.error = '该问题已经发送'; this.render(id); return false; }
-    this.sendingIds.add(id); item.error = undefined;
-    pending = this.pendingThreads.markWaitingForSubmission(id) ?? pending;
-    item.thread = { ...item.thread, status: 'waiting_for_submission', updatedAt: this.now().toISOString() };
-    this.render(id);
-    try {
-      await this.webBridge.savePendingThread(pending, item.thread);
-      const record = await this.webBridge.sendPendingPrompt(id);
       this.pendingThreads.restore(record.pendingThread); item.thread = record.localThread;
       void Promise.all([this.threadStore?.upsert(item.thread), this.pendingStore?.upsert(record.pendingThread)]);
       showOperationToast('已发送'); this.render(id); return true;
@@ -456,6 +466,8 @@ export class InlineThreadManager {
     }
     this.pendingThreads.restore(record.pendingThread);
     const wasAttached = item.thread.status === 'answer_attached';
+    const previousLatestRoundId = [...item.thread.messages].reverse().find((message) => message.role === 'user')?.id;
+    const previousLatestHadAnswer = item.thread.messages.at(-1)?.role === 'assistant';
     item.thread = record.localThread;
     if (item.thread.status !== 'failed') item.error = undefined;
     if (item.thread.answerMode === 'dedicated_branch' && record.targetConversationUrl) {
@@ -468,6 +480,14 @@ export class InlineThreadManager {
         targetConversationKey: record.targetConversationUrl,
         updatedAt: this.now().toISOString(),
       }));
+    }
+    const latestRoundId = [...item.thread.messages].reverse().find((message) => message.role === 'user')?.id;
+    const latestHasAnswer = item.thread.messages.at(-1)?.role === 'assistant';
+    if (latestRoundId && latestHasAnswer && (!previousLatestHadAnswer || previousLatestRoundId !== latestRoundId)) {
+      const userRoundIds = item.thread.messages.filter((message) => message.role === 'user').map((message) => message.id);
+      const collapsed = new Set(item.thread.collapsedRoundIds ?? userRoundIds.slice(0, -1));
+      collapsed.delete(latestRoundId);
+      item.thread = { ...item.thread, collapsedRoundIds: [...collapsed] };
     }
     if (!wasAttached && item.thread.status === 'answer_attached' && item.thread.answerMode === 'current_conversation') {
       this.expandedIds.add(item.thread.id);
@@ -564,12 +584,18 @@ export class InlineThreadManager {
       return true;
     }
     const timestamp = this.now().toISOString();
+    const hadExplicitState = Array.isArray(item.thread.collapsedRoundIds);
     item.thread = {
       ...item.thread,
       messages,
       status: messages.at(-1)?.role === 'assistant' ? 'answer_attached' : 'waiting_for_answer',
       updatedAt: timestamp,
     };
+    const collapsed = new Set(item.thread.collapsedRoundIds ?? []);
+    collapsed.delete(userMessageId);
+    const latestRoundId = messages.filter((message) => message.role === 'user').at(-1)?.id;
+    if (latestRoundId) collapsed.delete(latestRoundId);
+    item.thread.collapsedRoundIds = hadExplicitState ? [...collapsed] : undefined;
     const lastQuestionBlocks = [...messages].reverse().find((message) => message.role === 'user')?.content;
     const lastQuestion = lastQuestionBlocks ? richPlainText(lastQuestionBlocks) : '';
     const updatedPending = lastQuestion ? this.pendingThreads.updateQuestion(id, lastQuestion) : pending;
@@ -663,6 +689,11 @@ export class InlineThreadManager {
     const timestamp = this.now().toISOString();
     this.expandedIds.add(id); item.thread = { ...item.thread, expanded: true, updatedAt: timestamp };
     void this.threadStore?.setExpanded(id, true, timestamp); this.render(id);
+    item.host.classList.add('pointask-thread-highlight');
+    const previousTimer = this.highlightTimers.get(id); if (previousTimer) clearTimeout(previousTimer);
+    this.highlightTimers.set(id, setTimeout(() => {
+      item.host.classList.remove('pointask-thread-highlight'); this.highlightTimers.delete(id);
+    }, 1_800));
     const schedule = window.requestAnimationFrame?.bind(window) ?? ((callback: FrameRequestCallback) => window.setTimeout(() => callback(performance.now()), 0));
     schedule(() => item.host.isConnected && item.host.scrollIntoView?.({ behavior: 'smooth', block: 'center' }));
     return true;
@@ -690,7 +721,7 @@ export class InlineThreadManager {
         onDelete={() => this.delete(id)}
         onCopy={() => void this.copy(id)}
         onOpenTarget={() => void (item.thread.answerMode === 'current_conversation' ? this.sendCurrentConversation(id)
-          : this.sendAssociatedConversation(id))}
+          : this.copyAndOpenTarget(id))}
         onManualBranch={() => void this.prepareManualBranch(id)}
         onCancel={() => this.cancel(id)}
         onOpenAnswer={() => {
@@ -723,6 +754,7 @@ export class InlineThreadManager {
           });
         }}
         onUpdateWorkspaceContext={() => item.workspace && this.workspaceContextHandler?.(item.workspace, id)}
+        onToggleRound={(roundId) => void this.toggleRound(id, roundId)}
       />,
     );
   }

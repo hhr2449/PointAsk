@@ -1,7 +1,7 @@
 import type { PendingThread } from './pending-thread-manager';
-import { isExecutePendingSendMessage, isPendingAssociationUpdate, type PendingAssociation, type PointAskRuntimeMessage } from './runtime-messages';
+import { isPendingAssociationUpdate, type PendingAssociation, type PointAskRuntimeMessage } from './runtime-messages';
 import type { AnswerSourceLocator, RichContentBlock } from '../shared/local-thread';
-import type { PendingNavigation } from '../storage/navigation-store';
+import type { PendingNavigation, PendingThreadReturn } from '../storage/navigation-store';
 import { isExtensionContextInvalidated } from '../storage/storage-driver';
 
 interface RuntimeMessenger {
@@ -21,6 +21,11 @@ export class WebConversationBridge {
 
   async openTargetChat(pendingThreadId: string): Promise<PendingAssociation> {
     return this.send({ type: 'pointask:open-target-chat', pendingThreadId });
+  }
+  async openOrAutoSendWorkspace(
+    pendingThreadId: string, promptHash: string, attemptId: string,
+  ): Promise<{ record: PendingAssociation; autoSent: boolean }> {
+    return this.send({ type: 'pointask:open-or-auto-send-workspace', pendingThreadId, promptHash, attemptId });
   }
   async openWorkspaceContextUpdate(workspaceId: string): Promise<void> {
     await this.send({ type: 'pointask:open-workspace-context-update', workspaceId });
@@ -91,6 +96,16 @@ export class WebConversationBridge {
   async getPendingNavigation(currentUrl = window.location.href): Promise<PendingNavigation | null> {
     return this.send({ type: 'pointask:get-pending-navigation', currentUrl });
   }
+  async getPendingThreadReturn(currentUrl = window.location.href): Promise<PendingThreadReturn | null> {
+    return this.send({ type: 'pointask:get-pending-thread-return', currentUrl });
+  }
+  onThreadReturnReady(callback: () => void): () => void {
+    const listener = (message: unknown) => {
+      if (message && typeof message === 'object' && (message as { type?: unknown }).type === 'pointask:thread-return-ready') callback();
+    };
+    this.runtime.onMessage?.addListener(listener);
+    return () => this.runtime.onMessage?.removeListener(listener);
+  }
   async completeNavigation(navigationId: string): Promise<void> {
     await this.send({ type: 'pointask:complete-navigation', navigationId });
   }
@@ -106,10 +121,6 @@ export class WebConversationBridge {
   async releasePromptSubmission(pendingThreadId: string, promptHash: string): Promise<PendingAssociation> {
     return this.send({ type: 'pointask:release-prompt-submission', pendingThreadId, promptHash });
   }
-  async sendPendingPrompt(pendingThreadId: string): Promise<PendingAssociation> {
-    return this.send({ type: 'pointask:send-pending-prompt', pendingThreadId });
-  }
-
   onPendingUpdated(callback: (record: PendingAssociation) => void): () => void {
     const listener = (message: unknown) => {
       if (isPendingAssociationUpdate(message)) callback(message.record);
@@ -118,22 +129,42 @@ export class WebConversationBridge {
     return () => this.runtime.onMessage?.removeListener(listener);
   }
 
-  onNavigationReady(callback: () => void): () => void {
-    const listener = (message: unknown) => {
-      if (message && typeof message === 'object' && (message as { type?: unknown }).type === 'pointask:navigation-ready') callback();
+  onExecutePendingSend(callback: (
+    record: PendingAssociation, attemptId: string, promptHash: string,
+  ) => Promise<{ ok: boolean; error?: string }>): () => void {
+    const listener = (message: unknown, _sender?: unknown, sendResponse?: (response: unknown) => void) => {
+      if (!message || typeof message !== 'object') return false;
+      const value = message as { type?: unknown; record?: PendingAssociation; attemptId?: unknown; promptHash?: unknown };
+      if (value.type !== 'pointask:execute-pending-send' || !value.record || typeof value.attemptId !== 'string' ||
+        typeof value.promptHash !== 'string' || value.record.pendingThread.id !== value.record.localThread.id ||
+        value.record.pendingThread.promptHash !== value.promptHash) return false;
+      void callback(value.record, value.attemptId, value.promptHash).then(
+        (result) => sendResponse?.({ ...result, attemptId: value.attemptId }),
+        (error: unknown) => sendResponse?.({ ok: false, attemptId: value.attemptId, error: error instanceof Error ? error.message : '发送失败，请重试' }),
+      );
+      return true;
     };
     this.runtime.onMessage?.addListener(listener);
     return () => this.runtime.onMessage?.removeListener(listener);
   }
 
-  onExecutePendingSend(callback: (record: PendingAssociation) => Promise<boolean>): () => void {
+  onTargetReadyProbe(callback: (targetConversationUrl: string) => {
+    ready: boolean; conversationUrl: string; composerReady: boolean;
+  }): () => void {
     const listener = (message: unknown, _sender?: unknown, sendResponse?: (response: unknown) => void) => {
-      if (!isExecutePendingSendMessage(message)) return false;
-      void callback(message.record).then(
-        (success) => sendResponse?.({ ok: success, error: success ? undefined : '发送失败，请重试' }),
-        (error: unknown) => sendResponse?.({ ok: false, error: error instanceof Error ? error.message : '发送失败，请重试' }),
-      );
+      if (!message || typeof message !== 'object') return false;
+      const value = message as { type?: unknown; targetConversationUrl?: unknown };
+      if (value.type !== 'pointask:ping' || typeof value.targetConversationUrl !== 'string') return false;
+      sendResponse?.(callback(value.targetConversationUrl));
       return true;
+    };
+    this.runtime.onMessage?.addListener(listener);
+    return () => this.runtime.onMessage?.removeListener(listener);
+  }
+
+  onNavigationReady(callback: () => void): () => void {
+    const listener = (message: unknown) => {
+      if (message && typeof message === 'object' && (message as { type?: unknown }).type === 'pointask:navigation-ready') callback();
     };
     this.runtime.onMessage?.addListener(listener);
     return () => this.runtime.onMessage?.removeListener(listener);

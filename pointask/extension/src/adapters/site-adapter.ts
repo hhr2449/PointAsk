@@ -24,7 +24,11 @@ export interface SiteAdapter {
   isMessageStreaming(element: HTMLElement): boolean;
   fillComposer(prompt: string): boolean;
   canSubmitComposer(): boolean;
+  isComposerReady(): boolean;
+  waitForComposerReady(timeoutMs?: number): Promise<boolean>;
+  waitForSubmitReady(timeoutMs?: number): Promise<boolean>;
   submitComposer(): boolean;
+  hasSubmittedPrompt(promptHash: string): boolean;
   findCandidateAnswer(promptHash: string, assistantFingerprintsBefore: string[]): CandidateAnswer | null;
   resolveAnswerSource(locator: AnswerSourceLocator): HTMLElement | null;
   getRecoveryMountElement(): HTMLElement | null;

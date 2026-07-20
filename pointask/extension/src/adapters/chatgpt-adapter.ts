@@ -27,6 +27,20 @@ function fingerprint(text: string): string {
   return stableTextHash(text);
 }
 
+function waitForDomCondition(test: () => boolean, timeoutMs: number): Promise<boolean> {
+  if (test()) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) return;
+      settled = true; observer.disconnect(); clearTimeout(timeout); resolve(value);
+    };
+    const observer = new MutationObserver(() => { if (test()) finish(true); });
+    observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+    const timeout = setTimeout(() => finish(test()), timeoutMs);
+  });
+}
+
 function mutationIsPointAskOnly(mutation: MutationRecord): boolean {
   const nodes = [...mutation.addedNodes, ...mutation.removedNodes];
   return nodes.length > 0 && nodes.every((node) => {
@@ -115,7 +129,18 @@ export class ChatGptAdapter implements SiteAdapter {
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
       setter?.call(composer, prompt);
     } else {
-      composer.textContent = prompt;
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(composer);
+      selection?.removeAllRanges(); selection?.addRange(range);
+      let inserted = false;
+      try {
+        inserted = typeof document.execCommand === 'function' && document.execCommand('insertText', false, prompt);
+      } catch { inserted = false; }
+      // execCommand drives hydrated contenteditable editors such as
+      // ProseMirror through their native input path. Keep a DOM fallback for
+      // early page states and test/browser implementations without it.
+      if (!inserted || composer.textContent !== prompt) composer.textContent = prompt;
     }
     composer.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
     return composer instanceof HTMLTextAreaElement ? composer.value === prompt : composer.textContent === prompt;
@@ -124,11 +149,38 @@ export class ChatGptAdapter implements SiteAdapter {
     const button = document.querySelector<HTMLButtonElement>(SEND_BUTTON_SELECTOR);
     return Boolean(button && !button.disabled && button.getAttribute('aria-disabled') !== 'true');
   }
+  isComposerReady(): boolean {
+    return Boolean(document.querySelector<HTMLElement>(COMPOSER_SELECTOR) &&
+      document.querySelector<HTMLButtonElement>(SEND_BUTTON_SELECTOR));
+  }
+  waitForComposerReady(timeoutMs = 30_000): Promise<boolean> {
+    return waitForDomCondition(() => document.querySelector<HTMLElement>(COMPOSER_SELECTOR) !== null, timeoutMs);
+  }
+  waitForSubmitReady(timeoutMs = 15_000): Promise<boolean> {
+    return waitForDomCondition(() => this.canSubmitComposer(), timeoutMs);
+  }
   submitComposer(): boolean {
     const button = document.querySelector<HTMLButtonElement>(SEND_BUTTON_SELECTOR);
     if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return false;
     button.click();
     return true;
+  }
+  hasSubmittedPrompt(promptHash: string): boolean {
+    if (!promptHash) return false;
+    return [...document.querySelectorAll<HTMLElement>(MESSAGE_SELECTOR)].some((message) => {
+      const userRole = message.querySelector<HTMLElement>('[data-message-author-role="user"]');
+      if (!userRole) return false;
+      const textCandidates = new Set<string>();
+      for (const content of userRole.querySelectorAll<HTMLElement>(USER_CONTENT_SELECTOR)) {
+        const text = normalizeText(content.innerText || content.textContent || '');
+        if (text) textCandidates.add(text);
+      }
+      const cleaned = userRole.cloneNode(true) as HTMLElement;
+      cleaned.querySelectorAll('button, [role="button"], svg').forEach((control) => control.remove());
+      const cleanedText = normalizeText(cleaned.innerText || cleaned.textContent || '');
+      if (cleanedText) textCandidates.add(cleanedText);
+      return [...textCandidates].some((text) => stableTextHash(text) === promptHash);
+    });
   }
   findCandidateAnswer(promptHash: string, assistantFingerprintsBefore: string[]): CandidateAnswer | null {
     if (!promptHash) return null;

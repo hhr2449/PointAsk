@@ -11,6 +11,7 @@ const inlineTypes = new Set<RichContentBlock['type']>([
 function normalizeSequence(values: RichContentBlock[], nested = false): RichContentBlock[] {
   const result: RichContentBlock[] = [];
   let pendingBreak = false;
+  let pendingWhitespace = '';
   const push = (block: RichContentBlock) => {
     const previous = result.at(-1);
     if (block.type === 'text' && previous?.type === 'text') previous.content += block.content;
@@ -19,7 +20,15 @@ function normalizeSequence(values: RichContentBlock[], nested = false): RichCont
   for (const value of values) {
     const block = normalizeBlock(value);
     if (!block) continue;
+    if (block.type === 'text' && /^\s+$/.test(block.content)) {
+      if (nested && result.length > 0 && inlineTypes.has(result.at(-1)!.type)) pendingWhitespace += block.content;
+      continue;
+    }
     if (block.type === 'line_break') { pendingBreak = result.length > 0; continue; }
+    if (pendingWhitespace) {
+      if (nested && inlineTypes.has(block.type)) push({ type: 'text', content: pendingWhitespace });
+      pendingWhitespace = '';
+    }
     if (pendingBreak && nested && result.length && inlineTypes.has(result.at(-1)!.type) && inlineTypes.has(block.type)) push({ type: 'line_break' });
     pendingBreak = false; push(block);
   }
@@ -28,7 +37,7 @@ function normalizeSequence(values: RichContentBlock[], nested = false): RichCont
 }
 
 function normalizeBlock(block: RichContentBlock): RichContentBlock | null {
-  if (block.type === 'text') return block.content && !/^\s+$/.test(block.content) ? { type: 'text', content: block.content } : null;
+  if (block.type === 'text') return block.content ? { type: 'text', content: block.content } : null;
   if (block.type === 'inline_code') return block.content ? { type: 'inline_code', content: block.content } : null;
   if (block.type === 'code' || block.type === 'code_block') {
     return block.content ? { type: 'code_block', content: block.content.replace(/^\n|\n$/g, ''), ...(block.language ? { language: block.language } : {}) } : null;
